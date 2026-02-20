@@ -104,13 +104,15 @@ def run_visual_review(
     target_kymo_width,
     slice_angle_deg,
 ):
+    script_path = os.path.join(os.path.dirname(__file__), "..", "CreateKymograph.py")
+    output_path = os.path.join(output_folder, "kymograph.jpg")
     command = [
         sys.executable,
-        "visual_review_tool.py",
+        script_path,
         "--image-folder",
         image_folder,
-        "--output-folder",
-        output_folder,
+        "--output-path",
+        output_path,
         "--images-per-day",
         str(int(images_per_day)),
         "--target-kymo-width",

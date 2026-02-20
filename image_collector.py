@@ -1,11 +1,15 @@
 import argparse
 import time
-from datetime import datetime
+from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
-from visual_review_tool import VisualReviewTool
+from CreateKymograph import VisualReviewTool
+
+
+PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 
 
 def parse_args():
@@ -20,7 +24,7 @@ def parse_args():
     parser.add_argument(
         "--interval-seconds",
         type=int,
-        default=3600,
+        default=1800,
         help="Capture interval in seconds (3600 hourly, 1800 every 30 minutes)",
     )
     parser.add_argument("--slices-dir", default="KymoSlices", help="Folder for captured source images")
@@ -44,6 +48,12 @@ def parse_args():
         help="Slice angle in degrees from vertical (default center vertical)",
     )
     parser.add_argument(
+        "--slice-angle-horizontal-deg",
+        type=float,
+        default=None,
+        help="Slice angle in degrees from horizontal (example: -30)",
+    )
+    parser.add_argument(
         "--slice-center-x-ratio",
         type=float,
         default=0.5,
@@ -55,9 +65,31 @@ def parse_args():
         default=0.5,
         help="Slice center Y position ratio (0.0 top, 1.0 bottom)",
     )
+    parser.add_argument(
+        "--slice-top-ratio",
+        type=float,
+        default=0.0,
+        help="Vertical clip top bound ratio for slice points (0.0 top, 1.0 bottom)",
+    )
+    parser.add_argument(
+        "--slice-bottom-ratio",
+        type=float,
+        default=1.0,
+        help="Vertical clip bottom bound ratio for slice points (0.0 top, 1.0 bottom)",
+    )
     parser.add_argument("--slice-start", default=None, help="Optional explicit slice start point x,y")
     parser.add_argument("--slice-end", default=None, help="Optional explicit slice end point x,y")
     parser.add_argument("--timeout-seconds", type=int, default=20, help="HTTP request timeout")
+    parser.add_argument(
+        "--capture-start",
+        default="09:00",
+        help="Local start time for captures in HH:MM (default 09:00)",
+    )
+    parser.add_argument(
+        "--capture-end",
+        default="16:00",
+        help="Local end time for captures in HH:MM (default 16:00)",
+    )
     return parser.parse_args()
 
 
@@ -76,6 +108,45 @@ def capture_image(image_url, destination_path, timeout_seconds):
 
 def day_image_paths(slices_dir, day_key):
     return sorted(slices_dir.glob(f"{day_key}_*.jpg"))
+
+
+def parse_hhmm(value):
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+        return dt_time(hour=parsed.hour, minute=parsed.minute)
+    except ValueError as exc:
+        raise ValueError(f"Invalid time '{value}'. Expected HH:MM in 24-hour format.") from exc
+
+
+def is_within_window(now_local, start_time, end_time):
+    current_minutes = now_local.hour * 60 + now_local.minute
+    start_minutes = start_time.hour * 60 + start_time.minute
+    end_minutes = end_time.hour * 60 + end_time.minute
+    return start_minutes <= current_minutes <= end_minutes
+
+
+def seconds_until_next_window(now_local, start_time, end_time):
+    today_start = now_local.replace(
+        hour=start_time.hour,
+        minute=start_time.minute,
+        second=0,
+        microsecond=0,
+    )
+    today_end = now_local.replace(
+        hour=end_time.hour,
+        minute=end_time.minute,
+        second=0,
+        microsecond=0,
+    )
+
+    if now_local < today_start:
+        target = today_start
+    elif now_local > today_end:
+        target = today_start + timedelta(days=1)
+    else:
+        return 0
+
+    return max(1, int((target - now_local).total_seconds()))
 
 
 def build_daily_kymograph(day_key, slices_dir, kymoday_dir, tool, images_per_day, target_kymo_width):
@@ -98,6 +169,11 @@ def build_daily_kymograph(day_key, slices_dir, kymoday_dir, tool, images_per_day
 def main():
     args = parse_args()
 
+    window_start = parse_hhmm(args.capture_start)
+    window_end = parse_hhmm(args.capture_end)
+    if window_start >= window_end:
+        raise ValueError("capture-start must be earlier than capture-end (same day window).")
+
     slices_dir = Path(args.slices_dir)
     kymoday_dir = Path(args.kymoday_dir)
     slices_dir.mkdir(parents=True, exist_ok=True)
@@ -106,8 +182,11 @@ def main():
     images_per_day = infer_images_per_day(args.interval_seconds, args.images_per_day)
     tool = VisualReviewTool(
         slice_angle_deg=args.slice_angle_deg,
+        slice_angle_from_horizontal_deg=args.slice_angle_horizontal_deg,
         slice_center_x_ratio=args.slice_center_x_ratio,
         slice_center_y_ratio=args.slice_center_y_ratio,
+        slice_top_ratio=args.slice_top_ratio,
+        slice_bottom_ratio=args.slice_bottom_ratio,
         slice_start=VisualReviewTool._parse_point(args.slice_start),
         slice_end=VisualReviewTool._parse_point(args.slice_end),
     )
@@ -115,23 +194,48 @@ def main():
     print(f"Collecting to: {slices_dir}")
     print(f"Daily outputs: {kymoday_dir}")
     print(f"Interval: {args.interval_seconds}s | images/day: {images_per_day}")
+    print(f"Capture window (Pacific time): {window_start.strftime('%H:%M')} to {window_end.strftime('%H:%M')}")
 
-    active_day = datetime.utcnow().strftime("%Y-%m-%d")
+    active_day = datetime.now(PACIFIC_TZ).strftime("%Y-%m-%d")
+    last_built_day = None
 
     try:
         while True:
-            now = datetime.utcnow()
+            now = datetime.now(PACIFIC_TZ)
             day_key = now.strftime("%Y-%m-%d")
 
+            if not is_within_window(now, window_start, window_end):
+                if now.time() > window_end and active_day == day_key and last_built_day != active_day:
+                    build_daily_kymograph(
+                        day_key=active_day,
+                        slices_dir=slices_dir,
+                        kymoday_dir=kymoday_dir,
+                        tool=tool,
+                        images_per_day=images_per_day,
+                        target_kymo_width=args.target_kymo_width,
+                    )
+                    last_built_day = active_day
+
+                if day_key != active_day:
+                    active_day = day_key
+
+                sleep_seconds = seconds_until_next_window(now, window_start, window_end)
+                next_start = now + timedelta(seconds=sleep_seconds)
+                print(f"Outside capture window. Sleeping until {next_start.strftime('%Y-%m-%d %H:%M:%S')}.")
+                time.sleep(sleep_seconds)
+                continue
+
             if day_key != active_day:
-                build_daily_kymograph(
-                    day_key=active_day,
-                    slices_dir=slices_dir,
-                    kymoday_dir=kymoday_dir,
-                    tool=tool,
-                    images_per_day=images_per_day,
-                    target_kymo_width=args.target_kymo_width,
-                )
+                if last_built_day != active_day:
+                    build_daily_kymograph(
+                        day_key=active_day,
+                        slices_dir=slices_dir,
+                        kymoday_dir=kymoday_dir,
+                        tool=tool,
+                        images_per_day=images_per_day,
+                        target_kymo_width=args.target_kymo_width,
+                    )
+                    last_built_day = active_day
                 active_day = day_key
 
             file_name = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
@@ -141,19 +245,20 @@ def main():
                 capture_image(args.image_url, destination, args.timeout_seconds)
                 print(f"Captured: {destination.name}")
             except Exception as exc:
-                print(f"Capture failed at {now.isoformat()}Z: {exc}")
+                print(f"Capture failed at {now.isoformat()}: {exc}")
 
             time.sleep(max(1, int(args.interval_seconds)))
     except KeyboardInterrupt:
         print("\nStopping collector. Building current-day kymograph before exit...")
-        build_daily_kymograph(
-            day_key=active_day,
-            slices_dir=slices_dir,
-            kymoday_dir=kymoday_dir,
-            tool=tool,
-            images_per_day=images_per_day,
-            target_kymo_width=args.target_kymo_width,
-        )
+        if last_built_day != active_day:
+            build_daily_kymograph(
+                day_key=active_day,
+                slices_dir=slices_dir,
+                kymoday_dir=kymoday_dir,
+                tool=tool,
+                images_per_day=images_per_day,
+                target_kymo_width=args.target_kymo_width,
+            )
         print("Stopped.")
 
 

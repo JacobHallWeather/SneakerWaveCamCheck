@@ -11,14 +11,22 @@ class VisualReviewTool:
     def __init__(
         self,
         slice_angle_deg=0.0,
+        slice_angle_from_horizontal_deg=None,
         slice_center_x_ratio=0.5,
         slice_center_y_ratio=0.5,
+        slice_top_ratio=0.0,
+        slice_bottom_ratio=1.0,
         slice_start=None,
         slice_end=None,
     ):
         self.slice_angle_deg = float(slice_angle_deg)
+        self.slice_angle_from_horizontal_deg = (
+            None if slice_angle_from_horizontal_deg is None else float(slice_angle_from_horizontal_deg)
+        )
         self.slice_center_x_ratio = float(slice_center_x_ratio)
         self.slice_center_y_ratio = float(slice_center_y_ratio)
+        self.slice_top_ratio = float(np.clip(slice_top_ratio, 0.0, 1.0))
+        self.slice_bottom_ratio = float(np.clip(slice_bottom_ratio, 0.0, 1.0))
         self.slice_start = slice_start
         self.slice_end = slice_end
 
@@ -89,6 +97,9 @@ class VisualReviewTool:
         return p1, p2
 
     def _slice_points(self, width, height):
+        top_y = int(round(min(self.slice_top_ratio, self.slice_bottom_ratio) * (height - 1)))
+        bottom_y = int(round(max(self.slice_top_ratio, self.slice_bottom_ratio) * (height - 1)))
+
         if self.slice_start is not None and self.slice_end is not None:
             start = np.array(self.slice_start, dtype=np.float32)
             end = np.array(self.slice_end, dtype=np.float32)
@@ -100,8 +111,12 @@ class VisualReviewTool:
                 ],
                 dtype=np.float32,
             )
-            angle_rad = np.deg2rad(self.slice_angle_deg)
-            direction = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=np.float32)
+            if self.slice_angle_from_horizontal_deg is not None:
+                angle_rad = np.deg2rad(self.slice_angle_from_horizontal_deg)
+                direction = np.array([np.cos(angle_rad), np.sin(angle_rad)], dtype=np.float32)
+            else:
+                angle_rad = np.deg2rad(self.slice_angle_deg)
+                direction = np.array([np.sin(angle_rad), np.cos(angle_rad)], dtype=np.float32)
             segment = self._line_segment_through_image(center, direction, width, height)
             if segment is None:
                 raise RuntimeError("Slice line does not intersect image bounds.")
@@ -113,6 +128,15 @@ class VisualReviewTool:
 
         xi = np.clip(np.round(xs).astype(np.int32), 0, width - 1)
         yi = np.clip(np.round(ys).astype(np.int32), 0, height - 1)
+
+        vertical_mask = (yi >= top_y) & (yi <= bottom_y)
+        xi = xi[vertical_mask]
+        yi = yi[vertical_mask]
+        if xi.size < 2:
+            raise RuntimeError(
+                "Slice clipping removed all points. Adjust --slice-top-ratio/--slice-bottom-ratio or slice angle/position."
+            )
+
         return xi, yi, (int(round(start[0])), int(round(start[1]))), (int(round(end[0])), int(round(end[1])))
 
     @staticmethod
@@ -228,6 +252,12 @@ def parse_args():
         help="Slice angle in degrees from vertical (0=center vertical slice)",
     )
     parser.add_argument(
+        "--slice-angle-horizontal-deg",
+        type=float,
+        default=None,
+        help="Slice angle in degrees from horizontal (example: -30)",
+    )
+    parser.add_argument(
         "--slice-center-x-ratio",
         type=float,
         default=0.5,
@@ -238,6 +268,18 @@ def parse_args():
         type=float,
         default=0.5,
         help="Slice center Y position ratio (0.0 top, 1.0 bottom)",
+    )
+    parser.add_argument(
+        "--slice-top-ratio",
+        type=float,
+        default=0.0,
+        help="Vertical clip top bound ratio for slice points (0.0 top, 1.0 bottom)",
+    )
+    parser.add_argument(
+        "--slice-bottom-ratio",
+        type=float,
+        default=1.0,
+        help="Vertical clip bottom bound ratio for slice points (0.0 top, 1.0 bottom)",
     )
     parser.add_argument(
         "--slice-start",
@@ -257,8 +299,11 @@ def main():
     args = parse_args()
     tool = VisualReviewTool(
         slice_angle_deg=args.slice_angle_deg,
+        slice_angle_from_horizontal_deg=args.slice_angle_horizontal_deg,
         slice_center_x_ratio=args.slice_center_x_ratio,
         slice_center_y_ratio=args.slice_center_y_ratio,
+        slice_top_ratio=args.slice_top_ratio,
+        slice_bottom_ratio=args.slice_bottom_ratio,
         slice_start=VisualReviewTool._parse_point(args.slice_start),
         slice_end=VisualReviewTool._parse_point(args.slice_end),
     )
