@@ -1,75 +1,40 @@
-import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 
-class WaveDetector:
-    def __init__(self, left_region_start=0.05, left_region_end=0.35,
-                 right_region_start=0.65, right_region_end=0.95,
-                 vertical_percent=0.30, bottom_margin_px=60):
-        self.left_region_start = left_region_start
-        self.left_region_end = left_region_end
-        self.right_region_start = right_region_start
-        self.right_region_end = right_region_end
-        self.vertical_percent = vertical_percent
-        self.bottom_margin_px = bottom_margin_px
+class AngledTreeLineDetector:
+    def __init__(self, boundary_points):
+        """Initialize with boundary line coordinates."""
+        self.boundary_points = boundary_points
 
-    def detect_wave(self, image):
-        height, width, _ = image.shape
+    def detect(self, scan_length):
+        """Scan for wet sand across the boundary line."""
+        # Assuming boundary_points is a list of tuples [(x1, y1), (x2, y2)]
+        detection_points = []
+        for i in range(len(self.boundary_points) - 1):
+            p1 = np.array(self.boundary_points[i])
+            p2 = np.array(self.boundary_points[i + 1])
+            # Calculate the direction of the boundary line
+            line_dir = p2 - p1
+            line_unit = line_dir / np.linalg.norm(line_dir)
 
-        # Define regions
-        left_region = image[int(height * self.vertical_percent):height - self.bottom_margin_px,
-                            int(width * self.left_region_start):int(width * self.left_region_end)]
-        right_region = image[int(height * self.vertical_percent):height - self.bottom_margin_px,
-                             int(width * self.right_region_start):int(width * self.right_region_end)]
+            # Calculate perpendicular direction
+            perp_dir = np.array([-line_unit[1], line_unit[0]])
+            detection_point = p1 + (scan_length * perp_dir)
+            detection_points.append(detection_point)
 
-        # Generate sample points
-        left_sample_points = [(int(width * self.left_region_start + (i * (width * (self.left_region_end - self.left_region_start) / 4)), int(height * self.vertical_percent)) ) for i in range(4)]
-        right_sample_points = [(int(width * self.right_region_start + (i * (width * (self.right_region_end - self.right_region_start) / 4)), int(height * self.vertical_percent)) ) for i in range(4)]
+        return detection_points
 
-        # Perform gradient-based waterline detection
-        left_waterline = self._detect_waterline(left_region)
-        right_waterline = self._detect_waterline(right_region)
+    def visualize(self, detection_points):
+        """Visualize the boundary line and detection points."""
+        boundary_x, boundary_y = zip(*self.boundary_points)
+        detection_x, detection_y = zip(*detection_points)
 
-        # Check for sneaker wave conditions
-        if left_waterline is None and right_waterline is None:
-            return "No waterline detected in both regions. Sneaker wave alert!"
-
-        # Visualization
-        self.visualize(image, left_sample_points, right_sample_points, left_waterline, right_waterline)
-        return left_waterline, right_waterline
-
-    def _detect_waterline(self, region):
-        # Convert to grayscale and apply Gaussian blur
-        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        # Calculate gradient
-gradient = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=5)
-        _, thresh = cv2.threshold(np.abs(gradient), 30, 255, cv2.THRESH_BINARY)
-
-        # Find contours
-        contours, _ = cv2.findContours(thresh.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        if len(contours) == 0:
-            return None
-
-        # Find the highest point in the contours as the beach waterline
-        waterline = max(contours, key=lambda x: cv2.contourArea(x))
-        return waterline
-
-    def visualize(self, original_image, left_points, right_points, left_waterline, right_waterline):
-        # Draw sample points
-        for point in left_points:
-            cv2.circle(original_image, point, 5, (0, 255, 0), -1)  # Green for left
-        for point in right_points:
-            cv2.circle(original_image, point, 5, (255, 0, 0), -1)  # Blue for right
-
-        # Draw detected waterlines
-        if left_waterline is not None:
-            cv2.drawContours(original_image, [left_waterline], -1, (0, 0, 255), 2)  # Red for left waterline
-        if right_waterline is not None:
-            cv2.drawContours(original_image, [right_waterline], -1, (0, 0, 255), 2)  # Red for right waterline
-
-        # Show the image
-        cv2.imshow('Wave Detector', original_image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        plt.figure()
+        plt.plot(boundary_x, boundary_y, 'g-', label='Boundary Line')  # boundary line
+        plt.scatter(detection_x, detection_y, color='red', label='Detection Points')  # detection points
+        plt.title('Angled Tree Line Detection')
+        plt.xlabel('X Coordinate')
+        plt.ylabel('Y Coordinate')
+        plt.legend()
+        plt.grid()
+        plt.show()
