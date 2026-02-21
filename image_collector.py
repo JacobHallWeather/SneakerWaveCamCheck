@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from CreateKymograph import VisualReviewTool
+from CreateKymograph import DEFAULT_SLICE_END, DEFAULT_SLICE_START, VisualReviewTool
 
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument(
         "--interval-seconds",
         type=int,
-        default=1800,
+        default=900,
         help="Capture interval in seconds (3600 hourly, 1800 every 30 minutes)",
     )
     parser.add_argument("--slices-dir", default="KymoSlices", help="Folder for captured source images")
@@ -38,8 +38,36 @@ def parse_args():
     parser.add_argument(
         "--target-kymo-width",
         type=int,
-        default=2400,
+        default=1440,
         help="Target daily kymograph width in pixels",
+    )
+    parser.add_argument(
+        "--slice-preview-path",
+        default=None,
+        help="Output path for full-image slice overlay preview",
+    )
+    parser.add_argument(
+        "--slice-preview-show-clip-guides",
+        action="store_true",
+        help="Show red top/bottom clip guide lines on preview image",
+    )
+    parser.add_argument(
+        "--slice-vertical-stretch",
+        type=float,
+        default=1.0,
+        help="Scale factor for kymograph height (use >1.0 to enlarge a short slice)",
+    )
+    parser.add_argument(
+        "--slice-thickness-px",
+        type=int,
+        default=15,
+        help="Source slice thickness in pixels sampled perpendicular to the slice line",
+    )
+    parser.add_argument(
+        "--normalize-slice-brightness",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Normalize each slice brightness to reduce cloud/daylight intensity swings (off by default)",
     )
     parser.add_argument(
         "--slice-angle-deg",
@@ -77,8 +105,8 @@ def parse_args():
         default=1.0,
         help="Vertical clip bottom bound ratio for slice points (0.0 top, 1.0 bottom)",
     )
-    parser.add_argument("--slice-start", default=None, help="Optional explicit slice start point x,y")
-    parser.add_argument("--slice-end", default=None, help="Optional explicit slice end point x,y")
+    parser.add_argument("--slice-start", default=DEFAULT_SLICE_START, help="Optional explicit slice start point x,y")
+    parser.add_argument("--slice-end", default=DEFAULT_SLICE_END, help="Optional explicit slice end point x,y")
     parser.add_argument("--timeout-seconds", type=int, default=20, help="HTTP request timeout")
     parser.add_argument(
         "--capture-start",
@@ -149,7 +177,16 @@ def seconds_until_next_window(now_local, start_time, end_time):
     return max(1, int((target - now_local).total_seconds()))
 
 
-def build_daily_kymograph(day_key, slices_dir, kymoday_dir, tool, images_per_day, target_kymo_width):
+def build_daily_kymograph(
+    day_key,
+    slices_dir,
+    kymoday_dir,
+    tool,
+    images_per_day,
+    target_kymo_width,
+    slice_preview_path=None,
+    preview_show_clip_guides=False,
+):
     images = day_image_paths(slices_dir, day_key)
     if not images:
         print(f"No captures found for {day_key}; skipping daily kymograph.")
@@ -161,6 +198,8 @@ def build_daily_kymograph(day_key, slices_dir, kymoday_dir, tool, images_per_day
         output_path=str(output_path),
         images_per_day=images_per_day,
         target_kymo_width=target_kymo_width,
+        preview_path=slice_preview_path,
+        preview_show_clip_guides=preview_show_clip_guides,
     )
     print(f"Daily kymograph written: {output_path}")
     return output_path
@@ -189,11 +228,20 @@ def main():
         slice_bottom_ratio=args.slice_bottom_ratio,
         slice_start=VisualReviewTool._parse_point(args.slice_start),
         slice_end=VisualReviewTool._parse_point(args.slice_end),
+        slice_vertical_stretch=args.slice_vertical_stretch,
+        normalize_slice_brightness=args.normalize_slice_brightness,
+        slice_thickness_px=args.slice_thickness_px,
     )
 
     print(f"Collecting to: {slices_dir}")
     print(f"Daily outputs: {kymoday_dir}")
     print(f"Interval: {args.interval_seconds}s | images/day: {images_per_day}")
+    display_slice_width = VisualReviewTool._slice_width(images_per_day, args.target_kymo_width)
+    print(
+        "Kymograph settings: "
+        f"target width={args.target_kymo_width}px | display slice width={display_slice_width}px | "
+        f"source slice thickness={args.slice_thickness_px}px"
+    )
     print(f"Capture window (Pacific time): {window_start.strftime('%H:%M')} to {window_end.strftime('%H:%M')}")
 
     active_day = datetime.now(PACIFIC_TZ).strftime("%Y-%m-%d")
@@ -213,6 +261,8 @@ def main():
                         tool=tool,
                         images_per_day=images_per_day,
                         target_kymo_width=args.target_kymo_width,
+                        slice_preview_path=args.slice_preview_path,
+                        preview_show_clip_guides=args.slice_preview_show_clip_guides,
                     )
                     last_built_day = active_day
 
@@ -234,6 +284,8 @@ def main():
                         tool=tool,
                         images_per_day=images_per_day,
                         target_kymo_width=args.target_kymo_width,
+                        slice_preview_path=args.slice_preview_path,
+                        preview_show_clip_guides=args.slice_preview_show_clip_guides,
                     )
                     last_built_day = active_day
                 active_day = day_key
@@ -258,6 +310,8 @@ def main():
                 tool=tool,
                 images_per_day=images_per_day,
                 target_kymo_width=args.target_kymo_width,
+                slice_preview_path=args.slice_preview_path,
+                preview_show_clip_guides=args.slice_preview_show_clip_guides,
             )
         print("Stopped.")
 
