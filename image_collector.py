@@ -6,7 +6,13 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from CreateKymograph import DEFAULT_SLICE_END, DEFAULT_SLICE_START, VisualReviewTool
+from CreateKymograph import (
+    DEFAULT_SLICE_END,
+    DEFAULT_SLICE_ROW_ENDS,
+    DEFAULT_SLICE_ROW_STARTS,
+    DEFAULT_SLICE_START,
+    VisualReviewTool,
+)
 
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
@@ -62,6 +68,34 @@ def parse_args():
         type=int,
         default=15,
         help="Source slice thickness in pixels sampled perpendicular to the slice line",
+    )
+    parser.add_argument(
+        "--slice-rows",
+        type=int,
+        default=3,
+        help="Number of parallel slice rows to stack vertically in the output",
+    )
+    parser.add_argument(
+        "--slice-row-spacing-px",
+        type=float,
+        default=None,
+        help="Optional spacing between adjacent slice rows in pixels (auto if omitted)",
+    )
+    parser.add_argument(
+        "--slice-row-span-ratio",
+        type=float,
+        default=0.35,
+        help="When auto spacing is used, total row span as fraction of min(image width,height)",
+    )
+    parser.add_argument(
+        "--slice-row-starts",
+        default=DEFAULT_SLICE_ROW_STARTS,
+        help="Manual semicolon-separated start points for rows (example: 100,200;120,220;140,240)",
+    )
+    parser.add_argument(
+        "--slice-row-ends",
+        default=DEFAULT_SLICE_ROW_ENDS,
+        help="Manual semicolon-separated end points for rows (example: 300,400;320,420;340,440)",
     )
     parser.add_argument(
         "--normalize-slice-brightness",
@@ -208,6 +242,18 @@ def build_daily_kymograph(
 def main():
     args = parse_args()
 
+    manual_row_lines = None
+    if args.slice_row_starts or args.slice_row_ends:
+        if not args.slice_row_starts or not args.slice_row_ends:
+            raise ValueError("Provide both --slice-row-starts and --slice-row-ends when defining manual row positions.")
+        starts = VisualReviewTool._parse_point_list(args.slice_row_starts)
+        ends = VisualReviewTool._parse_point_list(args.slice_row_ends)
+        if not starts or not ends:
+            raise ValueError("Manual row starts/ends were provided but no valid points were parsed.")
+        if len(starts) != len(ends):
+            raise ValueError("--slice-row-starts and --slice-row-ends must contain the same number of points.")
+        manual_row_lines = list(zip(starts, ends))
+
     window_start = parse_hhmm(args.capture_start)
     window_end = parse_hhmm(args.capture_end)
     if window_start >= window_end:
@@ -231,16 +277,24 @@ def main():
         slice_vertical_stretch=args.slice_vertical_stretch,
         normalize_slice_brightness=args.normalize_slice_brightness,
         slice_thickness_px=args.slice_thickness_px,
+        slice_rows=args.slice_rows,
+        slice_row_spacing_px=args.slice_row_spacing_px,
+        slice_row_span_ratio=args.slice_row_span_ratio,
+        slice_row_lines=manual_row_lines,
     )
 
     print(f"Collecting to: {slices_dir}")
     print(f"Daily outputs: {kymoday_dir}")
     print(f"Interval: {args.interval_seconds}s | images/day: {images_per_day}")
     display_slice_width = VisualReviewTool._slice_width(images_per_day, args.target_kymo_width)
+    if manual_row_lines is not None:
+        row_config = f"manual row lines={len(manual_row_lines)}"
+    else:
+        row_config = f"slice rows={args.slice_rows}"
     print(
         "Kymograph settings: "
         f"target width={args.target_kymo_width}px | display slice width={display_slice_width}px | "
-        f"source slice thickness={args.slice_thickness_px}px"
+        f"source slice thickness={args.slice_thickness_px}px | {row_config}"
     )
     print(f"Capture window (Pacific time): {window_start.strftime('%H:%M')} to {window_end.strftime('%H:%M')}")
 

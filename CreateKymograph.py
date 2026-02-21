@@ -7,6 +7,8 @@ import numpy as np
 
 DEFAULT_SLICE_START = "1080,300"
 DEFAULT_SLICE_END = "1260,500"
+DEFAULT_SLICE_ROW_STARTS = "980,300;1080,300;1180,300"
+DEFAULT_SLICE_ROW_ENDS = "1160,500;1260,500;1360,500"
 
 
 class VisualReviewTool:
@@ -25,6 +27,10 @@ class VisualReviewTool:
         slice_vertical_stretch=1.0,
         normalize_slice_brightness=False,
         slice_thickness_px=15,
+        slice_rows=3,
+        slice_row_spacing_px=None,
+        slice_row_span_ratio=0.35,
+        slice_row_lines=None,
     ):
         self.slice_angle_deg = float(slice_angle_deg)
         self.slice_angle_from_horizontal_deg = (
@@ -39,6 +45,12 @@ class VisualReviewTool:
         self.slice_vertical_stretch = max(1.0, float(slice_vertical_stretch))
         self.normalize_slice_brightness = bool(normalize_slice_brightness)
         self.slice_thickness_px = max(1, int(slice_thickness_px))
+        self.slice_rows = max(1, int(slice_rows))
+        self.slice_row_spacing_px = (
+            None if slice_row_spacing_px is None else max(1.0, float(slice_row_spacing_px))
+        )
+        self.slice_row_span_ratio = max(0.0, float(slice_row_span_ratio))
+        self.slice_row_lines = slice_row_lines
 
     @staticmethod
     def _collect_images(image_folder, max_images=None):
@@ -71,6 +83,13 @@ class VisualReviewTool:
         if len(pieces) != 2:
             raise ValueError(f"Invalid point format '{value}'. Expected x,y")
         return int(float(pieces[0])), int(float(pieces[1]))
+
+    @staticmethod
+    def _parse_point_list(value):
+        if value is None:
+            return None
+        parts = [part.strip() for part in value.split(";") if part.strip()]
+        return [VisualReviewTool._parse_point(part) for part in parts]
 
     @staticmethod
     def _line_segment_through_image(center, direction, width, height):
@@ -106,10 +125,31 @@ class VisualReviewTool:
         p2 = np.array([x0 + t_max * dx, y0 + t_max * dy], dtype=np.float32)
         return p1, p2
 
-    def _slice_points(self, width, height):
+    def _line_to_slice_points(self, width, height, start, end):
         top_y = int(round(min(self.slice_top_ratio, self.slice_bottom_ratio) * (height - 1)))
         bottom_y = int(round(max(self.slice_top_ratio, self.slice_bottom_ratio) * (height - 1)))
 
+        start = np.array(start, dtype=np.float32)
+        end = np.array(end, dtype=np.float32)
+
+        length = int(max(2, round(float(np.linalg.norm(end - start)))))
+        xs = np.linspace(start[0], end[0], length)
+        ys = np.linspace(start[1], end[1], length)
+
+        xi = np.clip(np.round(xs).astype(np.int32), 0, width - 1)
+        yi = np.clip(np.round(ys).astype(np.int32), 0, height - 1)
+
+        vertical_mask = (yi >= top_y) & (yi <= bottom_y)
+        xi = xi[vertical_mask]
+        yi = yi[vertical_mask]
+        if xi.size < 2:
+            raise RuntimeError(
+                "Slice clipping removed all points. Adjust --slice-top-ratio/--slice-bottom-ratio or slice angle/position."
+            )
+
+        return xi, yi, (int(round(start[0])), int(round(start[1]))), (int(round(end[0])), int(round(end[1])))
+
+    def _slice_points(self, width, height):
         if self.slice_start is not None and self.slice_end is not None:
             start = np.array(self.slice_start, dtype=np.float32)
             end = np.array(self.slice_end, dtype=np.float32)
@@ -132,31 +172,75 @@ class VisualReviewTool:
                 raise RuntimeError("Slice line does not intersect image bounds.")
             start, end = segment
 
-        length = int(max(2, round(float(np.linalg.norm(end - start)))))
-        xs = np.linspace(start[0], end[0], length)
-        ys = np.linspace(start[1], end[1], length)
+        return self._line_to_slice_points(width=width, height=height, start=start, end=end)
 
-        xi = np.clip(np.round(xs).astype(np.int32), 0, width - 1)
-        yi = np.clip(np.round(ys).astype(np.int32), 0, height - 1)
+    def _slice_rows(self, width, height):
+        if self.slice_row_lines is not None:
+            rows = []
+            for start_pt, end_pt in self.slice_row_lines:
+                rows.append(
+                    self._line_to_slice_points(
+                        width=width,
+                        height=height,
+                        start=start_pt,
+                        end=end_pt,
+                    )
+                )
+            if not rows:
+                raise RuntimeError("No valid manual slice rows were provided.")
+            return rows
 
-        vertical_mask = (yi >= top_y) & (yi <= bottom_y)
-        xi = xi[vertical_mask]
-        yi = yi[vertical_mask]
-        if xi.size < 2:
-            raise RuntimeError(
-                "Slice clipping removed all points. Adjust --slice-top-ratio/--slice-bottom-ratio or slice angle/position."
+        base_xs, base_ys, base_start, base_end = self._slice_points(width, height)
+
+        if self.slice_rows == 1:
+            return [(base_xs, base_ys, base_start, base_end)]
+
+        dx = float(base_end[0] - base_start[0])
+        dy = float(base_end[1] - base_start[1])
+        length = float(np.hypot(dx, dy))
+        if length < 1e-6:
+            return [(base_xs, base_ys, base_start, base_end)]
+
+        nx = -dy / length
+        ny = dx / length
+
+        if self.slice_row_spacing_px is not None:
+            spacing_px = float(self.slice_row_spacing_px)
+        else:
+            total_span = float(min(width, height)) * self.slice_row_span_ratio
+            spacing_px = total_span / max(1, self.slice_rows - 1)
+
+        center_index = 0.5 * (self.slice_rows - 1)
+        offsets = [(row_idx - center_index) * spacing_px for row_idx in range(self.slice_rows)]
+
+        rows = []
+        for offset in offsets:
+
+            xi = np.clip(np.round(base_xs.astype(np.float32) + nx * offset).astype(np.int32), 0, width - 1)
+            yi = np.clip(np.round(base_ys.astype(np.float32) + ny * offset).astype(np.int32), 0, height - 1)
+            if xi.size < 2:
+                continue
+
+            start_off = (
+                int(np.clip(round(base_start[0] + nx * offset), 0, width - 1)),
+                int(np.clip(round(base_start[1] + ny * offset), 0, height - 1)),
             )
+            end_off = (
+                int(np.clip(round(base_end[0] + nx * offset), 0, width - 1)),
+                int(np.clip(round(base_end[1] + ny * offset), 0, height - 1)),
+            )
+            rows.append((xi, yi, start_off, end_off))
 
-        return xi, yi, (int(round(start[0])), int(round(start[1]))), (int(round(end[0])), int(round(end[1])))
+        if not rows:
+            raise RuntimeError("Slice row generation produced no valid rows.")
+
+        return rows
 
     @staticmethod
     def _save_slice_preview(
         image,
         preview_path,
-        xs,
-        ys,
-        start_pt,
-        end_pt,
+        slice_rows,
         top_ratio,
         bottom_ratio,
         show_clip_guides=False,
@@ -164,13 +248,39 @@ class VisualReviewTool:
         overlay = image.copy()
         height, width = overlay.shape[:2]
 
-        for i in range(1, len(xs)):
-            cv2.line(
+        for row_idx, (xs, ys, start_pt, end_pt) in enumerate(slice_rows, start=1):
+            for i in range(1, len(xs)):
+                cv2.line(
+                    overlay,
+                    (int(xs[i - 1]), int(ys[i - 1])),
+                    (int(xs[i]), int(ys[i])),
+                    (0, 255, 255),
+                    2,
+                )
+
+            cv2.circle(overlay, (int(start_pt[0]), int(start_pt[1])), 5, (0, 255, 0), -1)
+            cv2.circle(overlay, (int(end_pt[0]), int(end_pt[1])), 5, (0, 128, 255), -1)
+
+            label = f"R{row_idx} S{start_pt} E{end_pt}"
+            text_x = max(8, min(width - 420, int(start_pt[0]) + 8))
+            text_y = max(20, min(height - 10, int(start_pt[1]) - 8))
+            cv2.putText(
                 overlay,
-                (int(xs[i - 1]), int(ys[i - 1])),
-                (int(xs[i]), int(ys[i])),
-                (0, 255, 255),
-                2,
+                label,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 0),
+                3,
+            )
+            cv2.putText(
+                overlay,
+                label,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
             )
 
         if show_clip_guides:
@@ -181,7 +291,7 @@ class VisualReviewTool:
 
             cv2.putText(
                 overlay,
-                "Yellow: sampled slice | Red: top/bottom clip",
+                "Yellow: sampled slice | Green: start | Orange: end | Red: top/bottom clip",
                 (12, 28),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -277,23 +387,20 @@ class VisualReviewTool:
             raise RuntimeError(f"Could not load image: {images[0]}")
 
         height, width = first.shape[:2]
-        xs, ys, start_pt, end_pt = self._slice_points(width, height)
+        slice_rows = self._slice_rows(width, height)
         strip_width = self._slice_width(images_per_day, target_kymo_width)
 
         if preview_path is not None:
             self._save_slice_preview(
                 image=first,
                 preview_path=preview_path,
-                xs=xs,
-                ys=ys,
-                start_pt=start_pt,
-                end_pt=end_pt,
+                slice_rows=slice_rows,
                 top_ratio=self.slice_top_ratio,
                 bottom_ratio=self.slice_bottom_ratio,
                 show_clip_guides=preview_show_clip_guides,
             )
 
-        strips = []
+        row_strips = [[] for _ in slice_rows]
         processed = []
         for path in images:
             image = cv2.imread(str(path))
@@ -302,27 +409,37 @@ class VisualReviewTool:
             if image.shape[:2] != (height, width):
                 image = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
 
-            profile = self._extract_profile(
-                image=image,
-                xs=xs,
-                ys=ys,
-                start_pt=start_pt,
-                end_pt=end_pt,
-                thickness_px=self.slice_thickness_px,
-            )
-            if strip_width > 1:
-                profile = cv2.resize(profile, (strip_width, len(xs)), interpolation=cv2.INTER_LINEAR)
+            for row_idx, (xs, ys, start_pt, end_pt) in enumerate(slice_rows):
+                profile = self._extract_profile(
+                    image=image,
+                    xs=xs,
+                    ys=ys,
+                    start_pt=start_pt,
+                    end_pt=end_pt,
+                    thickness_px=self.slice_thickness_px,
+                )
+                if strip_width > 1:
+                    profile = cv2.resize(profile, (strip_width, len(xs)), interpolation=cv2.INTER_LINEAR)
+                row_strips[row_idx].append(profile)
 
-            strips.append(profile)
             processed.append(path.name)
 
-        if not strips:
+        if not any(row for row in row_strips):
             raise RuntimeError("No valid images could be processed for kymograph generation.")
 
-        if self.normalize_slice_brightness:
-            strips = self._match_slice_brightness(strips)
+        row_kymographs = []
+        for strips in row_strips:
+            if not strips:
+                continue
+            if self.normalize_slice_brightness:
+                strips = self._match_slice_brightness(strips)
+            row_kymographs.append(np.hstack(strips))
 
-        kymograph = np.hstack(strips)
+        if not row_kymographs:
+            raise RuntimeError("No kymograph rows were generated from the provided images.")
+
+        kymograph = np.vstack(row_kymographs)
+
         if self.slice_vertical_stretch > 1.0:
             stretched_height = int(round(kymograph.shape[0] * self.slice_vertical_stretch))
             kymograph = cv2.resize(kymograph, (kymograph.shape[1], max(2, stretched_height)), interpolation=cv2.INTER_LINEAR)
@@ -333,10 +450,13 @@ class VisualReviewTool:
         print(f"  Images used: {len(processed)}")
         print(f"  Slice width per image: {strip_width} px (images/day={images_per_day})")
         print(f"  Source slice thickness: {self.slice_thickness_px} px")
+        print(f"  Slice rows: {len(row_kymographs)}")
         print(f"  Vertical stretch: {self.slice_vertical_stretch:.2f}x")
         print(f"  Brightness normalized: {'yes' if self.normalize_slice_brightness else 'no'}")
-        print(f"  Slice endpoints: {start_pt} -> {end_pt}")
-        return output_path, (start_pt, end_pt)
+        center_row = slice_rows[len(slice_rows) // 2]
+        center_start, center_end = center_row[2], center_row[3]
+        print(f"  Center slice endpoints: {center_start} -> {center_end}")
+        return output_path, (center_start, center_end)
 
     def create_kymograph(
         self,
@@ -402,7 +522,7 @@ def parse_args():
     parser.add_argument(
         "--images-per-day",
         type=int,
-        default=24,
+        default=96,
         help="Expected captures per day (24 for hourly, 48 for every 30 min)",
     )
     parser.add_argument(
@@ -423,6 +543,34 @@ def parse_args():
         type=int,
         default=15,
         help="Source slice thickness in pixels sampled perpendicular to the slice line",
+    )
+    parser.add_argument(
+        "--slice-rows",
+        type=int,
+        default=3,
+        help="Number of parallel slice rows to stack vertically in the output",
+    )
+    parser.add_argument(
+        "--slice-row-spacing-px",
+        type=float,
+        default=None,
+        help="Optional spacing between adjacent slice rows in pixels (auto if omitted)",
+    )
+    parser.add_argument(
+        "--slice-row-span-ratio",
+        type=float,
+        default=0.35,
+        help="When auto spacing is used, total row span as fraction of min(image width,height)",
+    )
+    parser.add_argument(
+        "--slice-row-starts",
+        default=DEFAULT_SLICE_ROW_STARTS,
+        help="Manual semicolon-separated start points for rows (example: 100,200;120,220;140,240)",
+    )
+    parser.add_argument(
+        "--slice-row-ends",
+        default=DEFAULT_SLICE_ROW_ENDS,
+        help="Manual semicolon-separated end points for rows (example: 300,400;320,420;340,440)",
     )
     parser.add_argument(
         "--normalize-slice-brightness",
@@ -483,6 +631,19 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    manual_row_lines = None
+    if args.slice_row_starts or args.slice_row_ends:
+        if not args.slice_row_starts or not args.slice_row_ends:
+            raise ValueError("Provide both --slice-row-starts and --slice-row-ends when defining manual row positions.")
+        starts = VisualReviewTool._parse_point_list(args.slice_row_starts)
+        ends = VisualReviewTool._parse_point_list(args.slice_row_ends)
+        if not starts or not ends:
+            raise ValueError("Manual row starts/ends were provided but no valid points were parsed.")
+        if len(starts) != len(ends):
+            raise ValueError("--slice-row-starts and --slice-row-ends must contain the same number of points.")
+        manual_row_lines = list(zip(starts, ends))
+
     tool = VisualReviewTool(
         slice_angle_deg=args.slice_angle_deg,
         slice_angle_from_horizontal_deg=args.slice_angle_horizontal_deg,
@@ -495,6 +656,10 @@ def main():
         slice_vertical_stretch=args.slice_vertical_stretch,
         normalize_slice_brightness=args.normalize_slice_brightness,
         slice_thickness_px=args.slice_thickness_px,
+        slice_rows=args.slice_rows,
+        slice_row_spacing_px=args.slice_row_spacing_px,
+        slice_row_span_ratio=args.slice_row_span_ratio,
+        slice_row_lines=manual_row_lines,
     )
 
     output_parent = Path(args.output_path).parent
