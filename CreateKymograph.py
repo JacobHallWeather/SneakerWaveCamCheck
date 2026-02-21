@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -31,6 +32,8 @@ class VisualReviewTool:
         slice_row_spacing_px=None,
         slice_row_span_ratio=0.35,
         slice_row_lines=None,
+        header_photo_max_height=500,
+        header_photo_width_ratio=1,
     ):
         self.slice_angle_deg = float(slice_angle_deg)
         self.slice_angle_from_horizontal_deg = (
@@ -51,6 +54,8 @@ class VisualReviewTool:
         )
         self.slice_row_span_ratio = max(0.0, float(slice_row_span_ratio))
         self.slice_row_lines = slice_row_lines
+        self.header_photo_max_height = max(80, int(header_photo_max_height))
+        self.header_photo_width_ratio = float(np.clip(header_photo_width_ratio, 0.2, 1.0))
 
     @staticmethod
     def _collect_images(image_folder, max_images=None):
@@ -237,13 +242,13 @@ class VisualReviewTool:
         return rows
 
     @staticmethod
-    def _save_slice_preview(
+    def _draw_slice_overlay(
         image,
-        preview_path,
         slice_rows,
         top_ratio,
         bottom_ratio,
         show_clip_guides=False,
+        detailed_labels=False,
     ):
         overlay = image.copy()
         height, width = overlay.shape[:2]
@@ -261,26 +266,38 @@ class VisualReviewTool:
             cv2.circle(overlay, (int(start_pt[0]), int(start_pt[1])), 5, (0, 255, 0), -1)
             cv2.circle(overlay, (int(end_pt[0]), int(end_pt[1])), 5, (0, 128, 255), -1)
 
-            label = f"R{row_idx} S{start_pt} E{end_pt}"
-            text_x = max(8, min(width - 420, int(start_pt[0]) + 8))
-            text_y = max(20, min(height - 10, int(start_pt[1]) - 8))
+            label = f"R{row_idx} S{start_pt} E{end_pt}" if detailed_labels else f"{row_idx}"
+            if detailed_labels:
+                text_x = max(8, min(width - 420, int(start_pt[0]) + 8))
+                text_y = max(20, min(height - 10, int(start_pt[1]) - 8))
+                font_scale = 0.5
+                text_outline = 3
+                text_thickness = 1
+            else:
+                mid_x = int(round((start_pt[0] + end_pt[0]) * 0.5))
+                mid_y = int(round((start_pt[1] + end_pt[1]) * 0.5))
+                text_x = max(8, min(width - 30, mid_x - 10))
+                text_y = max(24, min(height - 8, mid_y - 8))
+                font_scale = 0.9
+                text_outline = 4
+                text_thickness = 2
             cv2.putText(
                 overlay,
                 label,
                 (text_x, text_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                font_scale,
                 (0, 0, 0),
-                3,
+                text_outline,
             )
             cv2.putText(
                 overlay,
                 label,
                 (text_x, text_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                font_scale,
                 (255, 255, 255),
-                1,
+                text_thickness,
             )
 
         if show_clip_guides:
@@ -299,16 +316,179 @@ class VisualReviewTool:
                 2,
             )
 
+        return overlay
+
+    @staticmethod
+    def _save_slice_preview(
+        image,
+        preview_path,
+        slice_rows,
+        top_ratio,
+        bottom_ratio,
+        show_clip_guides=False,
+    ):
+        overlay = VisualReviewTool._draw_slice_overlay(
+            image=image,
+            slice_rows=slice_rows,
+            top_ratio=top_ratio,
+            bottom_ratio=bottom_ratio,
+            show_clip_guides=show_clip_guides,
+            detailed_labels=False,
+        )
+
         preview_parent = Path(preview_path).parent
         if str(preview_parent) != "":
             preview_parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(preview_path), overlay)
 
     @staticmethod
+    def _infer_date_label(image_paths):
+        if not image_paths:
+            return datetime.now().strftime("%Y-%m-%d")
+
+        candidate = Path(image_paths[0]).stem.split("_")[0]
+        try:
+            parsed = datetime.strptime(candidate, "%Y-%m-%d")
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            return candidate
+
+    @staticmethod
+    def _build_row_labeled_kymograph(row_kymographs):
+        separator_height = 4
+        parts = []
+        row_spans = []
+        cursor_y = 0
+
+        for row_idx, row_img in enumerate(row_kymographs, start=1):
+            bordered = cv2.copyMakeBorder(row_img, 1, 1, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+            parts.append(bordered)
+            row_spans.append((row_idx, cursor_y, bordered.shape[0]))
+            cursor_y += bordered.shape[0]
+
+            if row_idx < len(row_kymographs):
+                separator = np.zeros((separator_height, bordered.shape[1], 3), dtype=np.uint8)
+                parts.append(separator)
+                cursor_y += separator_height
+
+        body = np.vstack(parts)
+
+        label_width = 56
+        label_col = np.full((body.shape[0], label_width, 3), 255, dtype=np.uint8)
+        cv2.line(label_col, (label_width - 1, 0), (label_width - 1, label_col.shape[0] - 1), (0, 0, 0), 2)
+
+        for row_idx, start_y, height in row_spans:
+            label_text = str(row_idx)
+            (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
+            text_x = max(4, (label_width - text_w) // 2)
+            text_y = start_y + (height + text_h) // 2 - 2
+            cv2.putText(label_col, label_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+
+        return np.hstack([label_col, body])
+
+    def _build_top_panel(self, reference_image, slice_rows, top_ratio, bottom_ratio, panel_width, date_label):
+        overlay = VisualReviewTool._draw_slice_overlay(
+            image=reference_image,
+            slice_rows=slice_rows,
+            top_ratio=top_ratio,
+            bottom_ratio=bottom_ratio,
+            show_clip_guides=False,
+            detailed_labels=False,
+        )
+        overlay = VisualReviewTool._crop_image_around_slices(overlay, slice_rows)
+
+        max_photo_width = max(120, int(round(panel_width * self.header_photo_width_ratio)))
+        scale = max_photo_width / float(overlay.shape[1])
+        resized_w = max(1, int(round(overlay.shape[1] * scale)))
+        resized_h = max(1, int(round(overlay.shape[0] * scale)))
+
+        max_photo_height = self.header_photo_max_height
+        if resized_h > max_photo_height:
+            photo_scale = max_photo_height / float(resized_h)
+            resized_w = max(1, int(round(resized_w * photo_scale)))
+            resized_h = max(1, int(round(resized_h * photo_scale)))
+
+        photo = cv2.resize(overlay, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+        top_padding = 64
+        bottom_padding = 12
+        panel_height = top_padding + resized_h + bottom_padding
+        panel = np.full((panel_height, panel_width, 3), 255, dtype=np.uint8)
+
+        date_text = str(date_label)
+        (text_w, text_h), _ = cv2.getTextSize(date_text, cv2.FONT_HERSHEY_SIMPLEX, 1.1, 2)
+        text_x = max(8, (panel_width - text_w) // 2)
+        text_y = max(24, (top_padding + text_h) // 2)
+        cv2.putText(panel, date_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 0), 2)
+
+        photo_x = max(0, (panel_width - resized_w) // 2)
+        photo_y = top_padding
+        panel[photo_y : photo_y + resized_h, photo_x : photo_x + resized_w] = photo
+        cv2.rectangle(panel, (photo_x, photo_y), (photo_x + resized_w - 1, photo_y + resized_h - 1), (0, 0, 0), 2)
+        return panel
+
+    @staticmethod
     def _slice_width(images_per_day, target_kymo_width):
         per_day = max(1, int(images_per_day))
         target = max(200, int(target_kymo_width))
         return max(1, int(round(target / per_day)))
+
+    @staticmethod
+    def _fit_row_to_target_width(strips, target_kymo_width):
+        if not strips:
+            return None
+        target_width = max(1, int(target_kymo_width))
+
+        strip_count = len(strips)
+        base_width = target_width // strip_count
+        remainder = target_width % strip_count
+        target_widths = [base_width + (1 if idx < remainder else 0) for idx in range(strip_count)]
+
+        resized_strips = []
+        for strip, strip_width in zip(strips, target_widths):
+            width = max(1, int(strip_width))
+            if strip.shape[1] == width:
+                resized_strips.append(strip)
+            else:
+                resized_strips.append(cv2.resize(strip, (width, strip.shape[0]), interpolation=cv2.INTER_LINEAR))
+
+        row = np.hstack(resized_strips)
+        return row
+
+    @staticmethod
+    def _crop_image_around_slices(image, slice_rows, margin_ratio=0.12, min_margin_px=20):
+        if image is None or not slice_rows:
+            return image
+
+        image_h, image_w = image.shape[:2]
+        x_values = []
+        y_values = []
+        for xs, ys, start_pt, end_pt in slice_rows:
+            x_values.append(xs.astype(np.int32))
+            y_values.append(ys.astype(np.int32))
+            x_values.append(np.array([start_pt[0], end_pt[0]], dtype=np.int32))
+            y_values.append(np.array([start_pt[1], end_pt[1]], dtype=np.int32))
+
+        if not x_values:
+            return image
+
+        x_min = int(np.min(np.concatenate(x_values)))
+        x_max = int(np.max(np.concatenate(x_values)))
+        y_min = int(np.min(np.concatenate(y_values)))
+        y_max = int(np.max(np.concatenate(y_values)))
+
+        box_w = max(1, x_max - x_min + 1)
+        box_h = max(1, y_max - y_min + 1)
+        margin = max(int(min_margin_px), int(round(max(box_w, box_h) * float(margin_ratio))))
+
+        left = max(0, x_min - margin)
+        right = min(image_w, x_max + margin + 1)
+        top = max(0, y_min - margin)
+        bottom = min(image_h, y_max + margin + 1)
+
+        if right - left < 2 or bottom - top < 2:
+            return image
+
+        return image[top:bottom, left:right].copy()
 
     @staticmethod
     def _match_slice_brightness(strips):
@@ -388,7 +568,6 @@ class VisualReviewTool:
 
         height, width = first.shape[:2]
         slice_rows = self._slice_rows(width, height)
-        strip_width = self._slice_width(images_per_day, target_kymo_width)
 
         if preview_path is not None:
             self._save_slice_preview(
@@ -402,12 +581,20 @@ class VisualReviewTool:
 
         row_strips = [[] for _ in slice_rows]
         processed = []
-        for path in images:
+        middle_index = len(images) // 2
+        middle_reference_image = None
+        fallback_reference_image = None
+        for image_idx, path in enumerate(images):
             image = cv2.imread(str(path))
             if image is None:
                 continue
             if image.shape[:2] != (height, width):
                 image = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+
+            if fallback_reference_image is None:
+                fallback_reference_image = image.copy()
+            if image_idx == middle_index:
+                middle_reference_image = image.copy()
 
             for row_idx, (xs, ys, start_pt, end_pt) in enumerate(slice_rows):
                 profile = self._extract_profile(
@@ -418,8 +605,6 @@ class VisualReviewTool:
                     end_pt=end_pt,
                     thickness_px=self.slice_thickness_px,
                 )
-                if strip_width > 1:
-                    profile = cv2.resize(profile, (strip_width, len(xs)), interpolation=cv2.INTER_LINEAR)
                 row_strips[row_idx].append(profile)
 
             processed.append(path.name)
@@ -433,22 +618,42 @@ class VisualReviewTool:
                 continue
             if self.normalize_slice_brightness:
                 strips = self._match_slice_brightness(strips)
-            row_kymographs.append(np.hstack(strips))
+            fitted = self._fit_row_to_target_width(strips, target_kymo_width)
+            if fitted is not None:
+                row_kymographs.append(fitted)
 
         if not row_kymographs:
             raise RuntimeError("No kymograph rows were generated from the provided images.")
 
-        kymograph = np.vstack(row_kymographs)
+        kymograph = self._build_row_labeled_kymograph(row_kymographs)
 
         if self.slice_vertical_stretch > 1.0:
             stretched_height = int(round(kymograph.shape[0] * self.slice_vertical_stretch))
             kymograph = cv2.resize(kymograph, (kymograph.shape[1], max(2, stretched_height)), interpolation=cv2.INTER_LINEAR)
 
+        reference_image = middle_reference_image if middle_reference_image is not None else fallback_reference_image
+        if reference_image is not None:
+            date_label = self._infer_date_label(images)
+            top_panel = self._build_top_panel(
+                reference_image=reference_image,
+                slice_rows=slice_rows,
+                top_ratio=self.slice_top_ratio,
+                bottom_ratio=self.slice_bottom_ratio,
+                panel_width=kymograph.shape[1],
+                date_label=date_label,
+            )
+            divider = np.zeros((4, kymograph.shape[1], 3), dtype=np.uint8)
+            kymograph = np.vstack([top_panel, divider, kymograph])
+
         cv2.imwrite(output_path, kymograph)
 
         print(f"✓ Kymograph saved: {output_path}")
         print(f"  Images used: {len(processed)}")
-        print(f"  Slice width per image: {strip_width} px (images/day={images_per_day})")
+        if processed:
+            dynamic_slice_width = float(max(200, int(target_kymo_width))) / float(len(processed))
+            print(f"  Slice width per image: {dynamic_slice_width:.2f} px (dynamic fit to {max(200, int(target_kymo_width))}px)")
+        else:
+            print("  Slice width per image: n/a")
         print(f"  Source slice thickness: {self.slice_thickness_px} px")
         print(f"  Slice rows: {len(row_kymographs)}")
         print(f"  Vertical stretch: {self.slice_vertical_stretch:.2f}x")
@@ -543,6 +748,18 @@ def parse_args():
         type=int,
         default=15,
         help="Source slice thickness in pixels sampled perpendicular to the slice line",
+    )
+    parser.add_argument(
+        "--header-photo-max-height",
+        type=int,
+        default=260,
+        help="Maximum height in pixels for the top header beach photo",
+    )
+    parser.add_argument(
+        "--header-photo-width-ratio",
+        type=float,
+        default=1.0,
+        help="Header beach photo width as a fraction of final output width (0.2-1.0)",
     )
     parser.add_argument(
         "--slice-rows",
@@ -660,6 +877,8 @@ def main():
         slice_row_spacing_px=args.slice_row_spacing_px,
         slice_row_span_ratio=args.slice_row_span_ratio,
         slice_row_lines=manual_row_lines,
+        header_photo_max_height=args.header_photo_max_height,
+        header_photo_width_ratio=args.header_photo_width_ratio,
     )
 
     output_parent = Path(args.output_path).parent

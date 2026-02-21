@@ -70,6 +70,18 @@ def parse_args():
         help="Source slice thickness in pixels sampled perpendicular to the slice line",
     )
     parser.add_argument(
+        "--header-photo-max-height",
+        type=int,
+        default=260,
+        help="Maximum height in pixels for the top header beach photo",
+    )
+    parser.add_argument(
+        "--header-photo-width-ratio",
+        type=float,
+        default=1.0,
+        help="Header beach photo width as a fraction of final output width (0.2-1.0)",
+    )
+    parser.add_argument(
         "--slice-rows",
         type=int,
         default=3,
@@ -281,6 +293,8 @@ def main():
         slice_row_spacing_px=args.slice_row_spacing_px,
         slice_row_span_ratio=args.slice_row_span_ratio,
         slice_row_lines=manual_row_lines,
+        header_photo_max_height=args.header_photo_max_height,
+        header_photo_width_ratio=args.header_photo_width_ratio,
     )
 
     print(f"Collecting to: {slices_dir}")
