@@ -34,6 +34,7 @@ class VisualReviewTool:
         slice_row_lines=None,
         header_photo_max_height=500,
         header_photo_width_ratio=1,
+        capture_window_label=None,
     ):
         self.slice_angle_deg = float(slice_angle_deg)
         self.slice_angle_from_horizontal_deg = (
@@ -56,6 +57,7 @@ class VisualReviewTool:
         self.slice_row_lines = slice_row_lines
         self.header_photo_max_height = max(80, int(header_photo_max_height))
         self.header_photo_width_ratio = float(np.clip(header_photo_width_ratio, 0.2, 1.0))
+        self.capture_window_label = capture_window_label
 
     @staticmethod
     def _collect_images(image_folder, max_images=None):
@@ -386,7 +388,16 @@ class VisualReviewTool:
 
         return np.hstack([label_col, body])
 
-    def _build_top_panel(self, reference_image, slice_rows, top_ratio, bottom_ratio, panel_width, date_label):
+    def _build_top_panel(
+        self,
+        reference_image,
+        slice_rows,
+        top_ratio,
+        bottom_ratio,
+        panel_width,
+        date_label,
+        images_used,
+    ):
         overlay = VisualReviewTool._draw_slice_overlay(
             image=reference_image,
             slice_rows=slice_rows,
@@ -397,7 +408,10 @@ class VisualReviewTool:
         )
         overlay = VisualReviewTool._crop_image_around_slices(overlay, slice_rows)
 
+        side_panel_width = max(130, int(round(panel_width * 0.12)))
+        max_allowed_photo_width = max(120, panel_width - (2 * side_panel_width) - 20)
         max_photo_width = max(120, int(round(panel_width * self.header_photo_width_ratio)))
+        max_photo_width = min(max_photo_width, max_allowed_photo_width)
         scale = max_photo_width / float(overlay.shape[1])
         resized_w = max(1, int(round(overlay.shape[1] * scale)))
         resized_h = max(1, int(round(overlay.shape[0] * scale)))
@@ -409,21 +423,67 @@ class VisualReviewTool:
             resized_h = max(1, int(round(resized_h * photo_scale)))
 
         photo = cv2.resize(overlay, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
-        top_padding = 64
+        top_padding = 20
         bottom_padding = 12
         panel_height = top_padding + resized_h + bottom_padding
         panel = np.full((panel_height, panel_width, 3), 255, dtype=np.uint8)
-
-        date_text = str(date_label)
-        (text_w, text_h), _ = cv2.getTextSize(date_text, cv2.FONT_HERSHEY_SIMPLEX, 1.1, 2)
-        text_x = max(8, (panel_width - text_w) // 2)
-        text_y = max(24, (top_padding + text_h) // 2)
-        cv2.putText(panel, date_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 0), 2)
 
         photo_x = max(0, (panel_width - resized_w) // 2)
         photo_y = top_padding
         panel[photo_y : photo_y + resized_h, photo_x : photo_x + resized_w] = photo
         cv2.rectangle(panel, (photo_x, photo_y), (photo_x + resized_w - 1, photo_y + resized_h - 1), (0, 0, 0), 2)
+
+        left_x = 12
+        left_y = top_padding + 30
+        cv2.putText(panel, f"Date: {date_label}", (left_x, left_y), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 0, 0), 2)
+        cv2.putText(
+            panel,
+            f"Slices: {len(slice_rows)}",
+            (left_x, left_y + 34),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.68,
+            (0, 0, 0),
+            2,
+        )
+        cv2.putText(
+            panel,
+            f"Images: {int(images_used)}",
+            (left_x, left_y + 68),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.68,
+            (0, 0, 0),
+            2,
+        )
+
+        right_anchor_x = panel_width - side_panel_width + 8
+        legend_y = top_padding + 24
+        cv2.putText(panel, "Legend", (right_anchor_x, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 2)
+        cv2.line(panel, (right_anchor_x, legend_y + 20), (right_anchor_x + 34, legend_y + 20), (0, 255, 255), 2)
+        cv2.putText(panel, "slice", (right_anchor_x + 40, legend_y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
+        cv2.circle(panel, (right_anchor_x + 9, legend_y + 44), 5, (0, 255, 0), -1)
+        cv2.putText(panel, "start", (right_anchor_x + 24, legend_y + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
+        cv2.circle(panel, (right_anchor_x + 9, legend_y + 67), 5, (0, 128, 255), -1)
+        cv2.putText(panel, "end", (right_anchor_x + 24, legend_y + 71), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
+
+        capture_label = self.capture_window_label if self.capture_window_label else "n/a"
+        cv2.putText(
+            panel,
+            "Capture",
+            (right_anchor_x, legend_y + 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            2,
+        )
+        cv2.putText(
+            panel,
+            str(capture_label),
+            (right_anchor_x, legend_y + 126),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 0),
+            2,
+        )
         return panel
 
     @staticmethod
@@ -641,6 +701,7 @@ class VisualReviewTool:
                 bottom_ratio=self.slice_bottom_ratio,
                 panel_width=kymograph.shape[1],
                 date_label=date_label,
+                images_used=len(processed),
             )
             divider = np.zeros((4, kymograph.shape[1], 3), dtype=np.uint8)
             kymograph = np.vstack([top_panel, divider, kymograph])
@@ -762,6 +823,11 @@ def parse_args():
         help="Header beach photo width as a fraction of final output width (0.2-1.0)",
     )
     parser.add_argument(
+        "--capture-window-label",
+        default=None,
+        help="Optional capture window label shown in the header side panel",
+    )
+    parser.add_argument(
         "--slice-rows",
         type=int,
         default=3,
@@ -879,6 +945,7 @@ def main():
         slice_row_lines=manual_row_lines,
         header_photo_max_height=args.header_photo_max_height,
         header_photo_width_ratio=args.header_photo_width_ratio,
+        capture_window_label=args.capture_window_label,
     )
 
     output_parent = Path(args.output_path).parent

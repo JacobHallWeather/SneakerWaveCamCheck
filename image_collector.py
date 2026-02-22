@@ -156,7 +156,7 @@ def parse_args():
     parser.add_argument("--timeout-seconds", type=int, default=20, help="HTTP request timeout")
     parser.add_argument(
         "--capture-start",
-        default="09:00",
+        default="08:00",
         help="Local start time for captures in HH:MM (default 09:00)",
     )
     parser.add_argument(
@@ -295,6 +295,7 @@ def main():
         slice_row_lines=manual_row_lines,
         header_photo_max_height=args.header_photo_max_height,
         header_photo_width_ratio=args.header_photo_width_ratio,
+        capture_window_label=f"{window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} PT",
     )
 
     print(f"Collecting to: {slices_dir}")
