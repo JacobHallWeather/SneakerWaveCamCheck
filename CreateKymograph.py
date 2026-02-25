@@ -9,7 +9,7 @@ import numpy as np
 DEFAULT_SLICE_START = "1080,300"
 DEFAULT_SLICE_END = "1260,500"
 DEFAULT_SLICE_ROW_STARTS = "1000,390;1100,350;1200,310"
-DEFAULT_SLICE_ROW_ENDS = "1080,450;1180,410;1280,370"
+DEFAULT_SLICE_ROW_ENDS = "1100,470;1200,430;1300,390"
 
 
 class VisualReviewTool:
@@ -35,6 +35,7 @@ class VisualReviewTool:
         header_photo_max_height=500,
         header_photo_width_ratio=1,
         capture_window_label=None,
+        capture_interval_label=None,
     ):
         self.slice_angle_deg = float(slice_angle_deg)
         self.slice_angle_from_horizontal_deg = (
@@ -58,6 +59,7 @@ class VisualReviewTool:
         self.header_photo_max_height = max(80, int(header_photo_max_height))
         self.header_photo_width_ratio = float(np.clip(header_photo_width_ratio, 0.2, 1.0))
         self.capture_window_label = capture_window_label
+        self.capture_interval_label = capture_interval_label
 
     @staticmethod
     def _collect_images(image_folder, max_images=None):
@@ -356,37 +358,171 @@ class VisualReviewTool:
             return candidate
 
     @staticmethod
+    def _infer_capture_label(image_paths):
+        if not image_paths:
+            return None
+
+        parsed_times = []
+        for path in image_paths:
+            stem = Path(path).stem
+            try:
+                parsed = datetime.strptime(stem, "%Y-%m-%d_%H-%M-%S")
+                parsed_times.append(parsed)
+            except ValueError:
+                continue
+
+        if not parsed_times:
+            return None
+
+        start = min(parsed_times)
+        end = max(parsed_times)
+        return f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+
+    @staticmethod
+    def _infer_interval_label(image_paths):
+        if not image_paths:
+            return None
+
+        parsed_times = []
+        for path in image_paths:
+            stem = Path(path).stem
+            try:
+                parsed_times.append(datetime.strptime(stem, "%Y-%m-%d_%H-%M-%S"))
+            except ValueError:
+                continue
+
+        if len(parsed_times) < 2:
+            return None
+
+        parsed_times = sorted(parsed_times)
+        deltas = []
+        for idx in range(1, len(parsed_times)):
+            delta_seconds = int((parsed_times[idx] - parsed_times[idx - 1]).total_seconds())
+            if delta_seconds > 0:
+                deltas.append(delta_seconds)
+
+        if not deltas:
+            return None
+
+        interval_seconds = int(round(float(np.median(np.array(deltas, dtype=np.float32)))))
+        if interval_seconds % 3600 == 0:
+            hours = interval_seconds // 3600
+            return f"{hours}h"
+        if interval_seconds >= 3600:
+            hours = interval_seconds // 3600
+            minutes = (interval_seconds % 3600) // 60
+            return f"{hours}h{minutes}m"
+        if interval_seconds % 60 == 0:
+            return f"{interval_seconds // 60}m"
+        return f"{interval_seconds}s"
+
+    @staticmethod
     def _build_row_labeled_kymograph(row_kymographs):
         separator_height = 4
         parts = []
-        row_spans = []
-        cursor_y = 0
 
         for row_idx, row_img in enumerate(row_kymographs, start=1):
             bordered = cv2.copyMakeBorder(row_img, 1, 1, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
             parts.append(bordered)
-            row_spans.append((row_idx, cursor_y, bordered.shape[0]))
-            cursor_y += bordered.shape[0]
 
             if row_idx < len(row_kymographs):
                 separator = np.zeros((separator_height, bordered.shape[1], 3), dtype=np.uint8)
                 parts.append(separator)
-                cursor_y += separator_height
 
         body = np.vstack(parts)
+        return body
 
-        label_width = 56
-        label_col = np.full((body.shape[0], label_width, 3), 255, dtype=np.uint8)
-        cv2.line(label_col, (label_width - 1, 0), (label_width - 1, label_col.shape[0] - 1), (0, 0, 0), 2)
+    @staticmethod
+    def _resize_to_fit(image, max_width, max_height):
+        if image is None:
+            return None
+        src_h, src_w = image.shape[:2]
+        if src_h < 1 or src_w < 1:
+            return image
 
-        for row_idx, start_y, height in row_spans:
-            label_text = str(row_idx)
-            (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
-            text_x = max(4, (label_width - text_w) // 2)
-            text_y = start_y + (height + text_h) // 2 - 2
-            cv2.putText(label_col, label_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+        width_scale = float(max(1, int(max_width))) / float(src_w)
+        height_scale = float(max(1, int(max_height))) / float(src_h)
+        scale = min(width_scale, height_scale)
+        out_w = max(1, int(round(src_w * scale)))
+        out_h = max(1, int(round(src_h * scale)))
+        if out_w == src_w and out_h == src_h:
+            return image
+        return cv2.resize(image, (out_w, out_h), interpolation=cv2.INTER_AREA)
 
-        return np.hstack([label_col, body])
+    @staticmethod
+    def _slot_widths(total_width, slot_count):
+        width = max(1, int(total_width))
+        count = max(1, int(slot_count))
+        base_width = width // count
+        remainder = width % count
+        return [base_width + (1 if idx < remainder else 0) for idx in range(count)]
+
+    @staticmethod
+    def _put_text_supersampled(image, text, org, font, font_scale, color, thickness, supersample=2):
+        if image is None or text is None or text == "":
+            return
+
+        ss = max(1, int(supersample))
+        if ss == 1:
+            cv2.putText(image, str(text), org, font, font_scale, color, thickness, cv2.LINE_AA)
+            return
+
+        text_value = str(text)
+        hi_scale = float(font_scale) * float(ss)
+        hi_thickness = max(1, int(round(float(thickness) * float(ss))))
+        (text_w_hi, text_h_hi), baseline_hi = cv2.getTextSize(text_value, font, hi_scale, hi_thickness)
+
+        pad_hi = 4 * ss
+        patch_w_hi = max(1, text_w_hi + (2 * pad_hi))
+        patch_h_hi = max(1, text_h_hi + baseline_hi + (2 * pad_hi))
+        patch_hi = np.zeros((patch_h_hi, patch_w_hi), dtype=np.uint8)
+
+        baseline_y_hi = pad_hi + text_h_hi
+        cv2.putText(
+            patch_hi,
+            text_value,
+            (pad_hi, baseline_y_hi),
+            font,
+            hi_scale,
+            255,
+            hi_thickness,
+            cv2.LINE_AA,
+        )
+
+        patch_w = max(1, int(round(patch_w_hi / float(ss))))
+        patch_h = max(1, int(round(patch_h_hi / float(ss))))
+        patch = cv2.resize(patch_hi, (patch_w, patch_h), interpolation=cv2.INTER_AREA)
+
+        baseline_y = int(round(baseline_y_hi / float(ss)))
+        pad = int(round(pad_hi / float(ss)))
+
+        x0 = int(org[0] - pad)
+        y0 = int(org[1] - baseline_y)
+        x1 = x0 + patch.shape[1]
+        y1 = y0 + patch.shape[0]
+
+        img_h, img_w = image.shape[:2]
+        clip_x0 = max(0, x0)
+        clip_y0 = max(0, y0)
+        clip_x1 = min(img_w, x1)
+        clip_y1 = min(img_h, y1)
+        if clip_x1 <= clip_x0 or clip_y1 <= clip_y0:
+            return
+
+        patch_x0 = clip_x0 - x0
+        patch_y0 = clip_y0 - y0
+        patch_x1 = patch_x0 + (clip_x1 - clip_x0)
+        patch_y1 = patch_y0 + (clip_y1 - clip_y0)
+
+        alpha = patch[patch_y0:patch_y1, patch_x0:patch_x1].astype(np.float32) / 255.0
+        if alpha.size == 0:
+            return
+        alpha_3 = alpha[:, :, None]
+
+        roi = image[clip_y0:clip_y1, clip_x0:clip_x1].astype(np.float32)
+        color_arr = np.array(color, dtype=np.float32).reshape(1, 1, 3)
+        blended = (roi * (1.0 - alpha_3)) + (color_arr * alpha_3)
+        image[clip_y0:clip_y1, clip_x0:clip_x1] = np.clip(blended, 0, 255).astype(np.uint8)
 
     def _build_top_panel(
         self,
@@ -397,6 +533,8 @@ class VisualReviewTool:
         panel_width,
         date_label,
         images_used,
+        capture_label,
+        interval_label,
     ):
         overlay = VisualReviewTool._draw_slice_overlay(
             image=reference_image,
@@ -406,81 +544,110 @@ class VisualReviewTool:
             show_clip_guides=False,
             detailed_labels=False,
         )
-        overlay = VisualReviewTool._crop_image_around_slices(overlay, slice_rows)
 
-        side_panel_width = max(130, int(round(panel_width * 0.12)))
-        max_allowed_photo_width = max(120, panel_width - (2 * side_panel_width) - 20)
-        max_photo_width = max(120, int(round(panel_width * self.header_photo_width_ratio)))
-        max_photo_width = min(max_photo_width, max_allowed_photo_width)
-        scale = max_photo_width / float(overlay.shape[1])
-        resized_w = max(1, int(round(overlay.shape[1] * scale)))
-        resized_h = max(1, int(round(overlay.shape[0] * scale)))
+        crop_margin_ratio = 0.22
+        crop_min_margin_px = 24
+        crop_bounds = VisualReviewTool._slice_crop_bounds(
+            image_shape=overlay.shape,
+            slice_rows=slice_rows,
+            margin_ratio=crop_margin_ratio,
+            min_margin_px=crop_min_margin_px,
+        )
+        if crop_bounds is not None:
+            left, right, top, bottom = crop_bounds
+            cv2.rectangle(overlay, (left, top), (right - 1, bottom - 1), (255, 0, 255), 4)
 
-        max_photo_height = self.header_photo_max_height
-        if resized_h > max_photo_height:
-            photo_scale = max_photo_height / float(resized_h)
-            resized_w = max(1, int(round(resized_w * photo_scale)))
-            resized_h = max(1, int(round(resized_h * photo_scale)))
+        cropped_overlay = VisualReviewTool._crop_image_around_slices(
+            overlay,
+            slice_rows,
+            margin_ratio=crop_margin_ratio,
+            min_margin_px=crop_min_margin_px,
+        )
 
-        photo = cv2.resize(overlay, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
-        top_padding = 20
-        bottom_padding = 12
-        panel_height = top_padding + resized_h + bottom_padding
+        outer_pad = 12
+        center_gap = 12
+        available_w = max(220, panel_width - (2 * outer_pad) - center_gap)
+        left_w = max(120, int(round(available_w * 0.56)))
+        right_w = max(100, available_w - left_w)
+
+        info_height = 108
+        right_image_max_height = max(120, int(self.header_photo_max_height))
+
+        left_image = VisualReviewTool._resize_to_fit(
+            overlay,
+            max_width=left_w,
+            max_height=right_image_max_height,
+        )
+        right_image = VisualReviewTool._resize_to_fit(
+            cropped_overlay,
+            max_width=right_w,
+            max_height=right_image_max_height,
+        )
+
+        images_height = max(left_image.shape[0], right_image.shape[0])
+        content_height = info_height + 10 + images_height
+        panel_height = (2 * outer_pad) + content_height
         panel = np.full((panel_height, panel_width, 3), 255, dtype=np.uint8)
 
-        photo_x = max(0, (panel_width - resized_w) // 2)
-        photo_y = top_padding
-        panel[photo_y : photo_y + resized_h, photo_x : photo_x + resized_w] = photo
-        cv2.rectangle(panel, (photo_x, photo_y), (photo_x + resized_w - 1, photo_y + resized_h - 1), (0, 0, 0), 2)
+        display_capture = capture_label if capture_label else "n/a"
+        display_interval = interval_label if interval_label else "n/a"
 
-        left_x = 12
-        left_y = top_padding + 30
-        cv2.putText(panel, f"Date: {date_label}", (left_x, left_y), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 0, 0), 2)
-        cv2.putText(
+        title_text = "Caped North Head - Kymograph"
+        title_y = outer_pad + 28
+        (title_w, _), _ = cv2.getTextSize(title_text, cv2.FONT_HERSHEY_SIMPLEX, 0.82, 2)
+        title_x = max(6, (panel_width - title_w) // 2)
+        VisualReviewTool._put_text_supersampled(
             panel,
-            f"Slices: {len(slice_rows)}",
-            (left_x, left_y + 34),
+            title_text,
+            (title_x, title_y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.68,
+            0.82,
+            (0, 0, 0),
+            2,
+            supersample=2,
+        )
+
+        info_top_y = outer_pad + 66
+        col_edges = np.linspace(outer_pad, panel_width - outer_pad, 4).astype(np.int32)
+        columns = [
+            f"Date: {date_label}",
+            f"Capture: {display_capture}",
+            f"Images: {int(images_used)} | Interval: {display_interval}",
+        ]
+        for idx, text in enumerate(columns):
+            center_x = int(round((int(col_edges[idx]) + int(col_edges[idx + 1])) / 2.0))
+            (text_w, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.54, 2)
+            text_x = max(6, center_x - (text_w // 2))
+            VisualReviewTool._put_text_supersampled(
+                panel,
+                text,
+                (text_x, info_top_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.54,
+                (0, 0, 0),
+                2,
+                supersample=2,
+            )
+
+        left_x = outer_pad + max(0, (left_w - left_image.shape[1]) // 2)
+        left_y = outer_pad + info_height + 10 + max(0, (images_height - left_image.shape[0]) // 2)
+        panel[left_y : left_y + left_image.shape[0], left_x : left_x + left_image.shape[1]] = left_image
+        cv2.rectangle(
+            panel,
+            (left_x, left_y),
+            (left_x + left_image.shape[1] - 1, left_y + left_image.shape[0] - 1),
             (0, 0, 0),
             2,
         )
-        cv2.putText(
-            panel,
-            f"Images: {int(images_used)}",
-            (left_x, left_y + 68),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.68,
-            (0, 0, 0),
-            2,
-        )
 
-        right_anchor_x = panel_width - side_panel_width + 8
-        legend_y = top_padding + 24
-        cv2.putText(panel, "Legend", (right_anchor_x, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 2)
-        cv2.line(panel, (right_anchor_x, legend_y + 20), (right_anchor_x + 34, legend_y + 20), (0, 255, 255), 2)
-        cv2.putText(panel, "slice", (right_anchor_x + 40, legend_y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
-        cv2.circle(panel, (right_anchor_x + 9, legend_y + 44), 5, (0, 255, 0), -1)
-        cv2.putText(panel, "start", (right_anchor_x + 24, legend_y + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
-        cv2.circle(panel, (right_anchor_x + 9, legend_y + 67), 5, (0, 128, 255), -1)
-        cv2.putText(panel, "end", (right_anchor_x + 24, legend_y + 71), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
-
-        capture_label = self.capture_window_label if self.capture_window_label else "n/a"
-        cv2.putText(
+        right_column_x = outer_pad + left_w + center_gap
+        right_x = right_column_x + max(0, (right_w - right_image.shape[1]) // 2)
+        right_y = outer_pad + info_height + 10 + max(0, (images_height - right_image.shape[0]) // 2)
+        panel[right_y : right_y + right_image.shape[0], right_x : right_x + right_image.shape[1]] = right_image
+        cv2.rectangle(
             panel,
-            "Capture",
-            (right_anchor_x, legend_y + 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 0, 0),
-            2,
-        )
-        cv2.putText(
-            panel,
-            str(capture_label),
-            (right_anchor_x, legend_y + 126),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
+            (right_x, right_y),
+            (right_x + right_image.shape[1] - 1, right_y + right_image.shape[0] - 1),
             (0, 0, 0),
             2,
         )
@@ -490,21 +657,43 @@ class VisualReviewTool:
     def _slice_width(images_per_day, target_kymo_width):
         per_day = max(1, int(images_per_day))
         target = max(200, int(target_kymo_width))
-        return max(1, int(round(target / per_day)))
+        return max(1, int(round(target / (per_day + 1))))
 
     @staticmethod
-    def _fit_row_to_target_width(strips, target_kymo_width):
+    def _fit_row_to_target_width(strips, target_kymo_width, row_label_text=None):
         if not strips:
             return None
         target_width = max(1, int(target_kymo_width))
 
+        include_label_slot = row_label_text is not None and str(row_label_text) != ""
         strip_count = len(strips)
-        base_width = target_width // strip_count
-        remainder = target_width % strip_count
-        target_widths = [base_width + (1 if idx < remainder else 0) for idx in range(strip_count)]
+        slot_count = strip_count + (1 if include_label_slot else 0)
+        target_widths = VisualReviewTool._slot_widths(total_width=target_width, slot_count=slot_count)
 
         resized_strips = []
-        for strip, strip_width in zip(strips, target_widths):
+        if include_label_slot:
+            label_width = max(1, int(target_widths[0]))
+            label_strip = np.full((strips[0].shape[0], label_width, 3), 235, dtype=np.uint8)
+            text = str(row_label_text)
+            (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            text_x = max(2, (label_width - text_w) // 2)
+            text_y = max(text_h + 2, (label_strip.shape[0] + text_h) // 2)
+            VisualReviewTool._put_text_supersampled(
+                label_strip,
+                text,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 0, 0),
+                2,
+                supersample=2,
+            )
+            resized_strips.append(label_strip)
+            strip_target_widths = target_widths[1:]
+        else:
+            strip_target_widths = target_widths
+
+        for strip, strip_width in zip(strips, strip_target_widths):
             width = max(1, int(strip_width))
             if strip.shape[1] == width:
                 resized_strips.append(strip)
@@ -515,11 +704,110 @@ class VisualReviewTool:
         return row
 
     @staticmethod
+    def _add_time_axis(kymograph_image, image_paths, target_kymo_width):
+        if kymograph_image is None or not image_paths:
+            return kymograph_image
+
+        parsed_times = []
+        for path in image_paths:
+            stem = Path(path).stem
+            try:
+                parsed_times.append(datetime.strptime(stem, "%Y-%m-%d_%H-%M-%S"))
+            except ValueError:
+                parsed_times.append(None)
+
+        valid_count = len([ts for ts in parsed_times if ts is not None])
+        if valid_count < 2:
+            return kymograph_image
+
+        width = max(1, int(target_kymo_width))
+        if kymograph_image.shape[1] != width:
+            return kymograph_image
+
+        axis_h = 56
+        axis = np.full((axis_h, width, 3), 255, dtype=np.uint8)
+        baseline_y = 1
+        tick_len = 8
+        cv2.line(axis, (0, baseline_y), (width - 1, baseline_y), (0, 0, 0), 1, cv2.LINE_AA)
+
+        slot_count = len(image_paths) + 1
+        slot_widths = VisualReviewTool._slot_widths(total_width=width, slot_count=slot_count)
+        left_edges = [0]
+        for slot_w in slot_widths[:-1]:
+            left_edges.append(left_edges[-1] + slot_w)
+
+        previous_labeled_hour = None
+        for idx in range(len(image_paths)):
+            slot_idx = idx + 1
+            x0 = left_edges[slot_idx]
+            w = slot_widths[slot_idx]
+            center_x = int(round(x0 + (w / 2.0)))
+            cv2.line(axis, (center_x, baseline_y), (center_x, baseline_y + tick_len), (0, 0, 0), 1, cv2.LINE_AA)
+
+            ts = parsed_times[idx]
+            if ts is None:
+                continue
+            current_hour = ts.hour
+            if previous_labeled_hour is not None and current_hour == previous_labeled_hour:
+                continue
+
+            label = ts.strftime("%H")
+            (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
+            text_x = int(np.clip(center_x - (text_w // 2), 0, max(0, width - text_w - 1)))
+            preferred_y = baseline_y + tick_len + 8 + text_h
+            text_y = int(min(axis_h - 4, preferred_y))
+            VisualReviewTool._put_text_supersampled(
+                axis,
+                label,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.58,
+                (0, 0, 0),
+                2,
+                supersample=2,
+            )
+            previous_labeled_hour = current_hour
+
+        axis_title = "Time PT"
+        (title_w, title_h), _ = cv2.getTextSize(axis_title, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 2)
+        title_x = max(2, (width - title_w) // 2)
+        title_y = max(title_h + 2, axis_h - 4)
+        VisualReviewTool._put_text_supersampled(
+            axis,
+            axis_title,
+            (title_x, title_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (0, 0, 0),
+            2,
+            supersample=2,
+        )
+
+        return np.vstack([kymograph_image, axis])
+
+    @staticmethod
     def _crop_image_around_slices(image, slice_rows, margin_ratio=0.12, min_margin_px=20):
-        if image is None or not slice_rows:
+        bounds = VisualReviewTool._slice_crop_bounds(
+            image_shape=None if image is None else image.shape,
+            slice_rows=slice_rows,
+            margin_ratio=margin_ratio,
+            min_margin_px=min_margin_px,
+        )
+        if image is None or bounds is None:
             return image
 
-        image_h, image_w = image.shape[:2]
+        left, right, top, bottom = bounds
+        if right - left < 2 or bottom - top < 2:
+            return image
+
+        return image[top:bottom, left:right].copy()
+
+    @staticmethod
+    def _slice_crop_bounds(image_shape, slice_rows, margin_ratio=0.12, min_margin_px=20):
+        if image_shape is None or not slice_rows:
+            return None
+
+        image_h, image_w = image_shape[:2]
         x_values = []
         y_values = []
         for xs, ys, start_pt, end_pt in slice_rows:
@@ -529,7 +817,7 @@ class VisualReviewTool:
             y_values.append(np.array([start_pt[1], end_pt[1]], dtype=np.int32))
 
         if not x_values:
-            return image
+            return None
 
         x_min = int(np.min(np.concatenate(x_values)))
         x_max = int(np.max(np.concatenate(x_values)))
@@ -546,9 +834,8 @@ class VisualReviewTool:
         bottom = min(image_h, y_max + margin + 1)
 
         if right - left < 2 or bottom - top < 2:
-            return image
-
-        return image[top:bottom, left:right].copy()
+            return None
+        return left, right, top, bottom
 
     @staticmethod
     def _match_slice_brightness(strips):
@@ -673,12 +960,12 @@ class VisualReviewTool:
             raise RuntimeError("No valid images could be processed for kymograph generation.")
 
         row_kymographs = []
-        for strips in row_strips:
+        for row_idx, strips in enumerate(row_strips, start=1):
             if not strips:
                 continue
             if self.normalize_slice_brightness:
                 strips = self._match_slice_brightness(strips)
-            fitted = self._fit_row_to_target_width(strips, target_kymo_width)
+            fitted = self._fit_row_to_target_width(strips, target_kymo_width, row_label_text=str(row_idx))
             if fitted is not None:
                 row_kymographs.append(fitted)
 
@@ -686,6 +973,7 @@ class VisualReviewTool:
             raise RuntimeError("No kymograph rows were generated from the provided images.")
 
         kymograph = self._build_row_labeled_kymograph(row_kymographs)
+        kymograph = self._add_time_axis(kymograph, images, max(200, int(target_kymo_width)))
 
         if self.slice_vertical_stretch > 1.0:
             stretched_height = int(round(kymograph.shape[0] * self.slice_vertical_stretch))
@@ -694,6 +982,10 @@ class VisualReviewTool:
         reference_image = middle_reference_image if middle_reference_image is not None else fallback_reference_image
         if reference_image is not None:
             date_label = self._infer_date_label(images)
+            inferred_capture_label = self.capture_window_label if self.capture_window_label else self._infer_capture_label(images)
+            interval_label = self.capture_interval_label if self.capture_interval_label else self._infer_interval_label(images)
+            if self.capture_window_label is None:
+                self.capture_window_label = inferred_capture_label
             top_panel = self._build_top_panel(
                 reference_image=reference_image,
                 slice_rows=slice_rows,
@@ -702,6 +994,8 @@ class VisualReviewTool:
                 panel_width=kymograph.shape[1],
                 date_label=date_label,
                 images_used=len(processed),
+                capture_label=inferred_capture_label,
+                interval_label=interval_label,
             )
             divider = np.zeros((4, kymograph.shape[1], 3), dtype=np.uint8)
             kymograph = np.vstack([top_panel, divider, kymograph])
@@ -711,8 +1005,20 @@ class VisualReviewTool:
         print(f"✓ Kymograph saved: {output_path}")
         print(f"  Images used: {len(processed)}")
         if processed:
-            dynamic_slice_width = float(max(200, int(target_kymo_width))) / float(len(processed))
-            print(f"  Slice width per image: {dynamic_slice_width:.2f} px (dynamic fit to {max(200, int(target_kymo_width))}px)")
+            dynamic_slice_width = float(max(200, int(target_kymo_width))) / float(len(processed) + 1)
+            print(
+                f"  Slice width per image: {dynamic_slice_width:.2f} px "
+                f"(dynamic fit to {max(200, int(target_kymo_width))}px, +1 label slot)"
+            )
+            capture_range_label = self.capture_window_label if self.capture_window_label else self._infer_capture_label(images)
+            if capture_range_label is not None:
+                print(f"  Capture range: {capture_range_label}")
+            if self.capture_interval_label is not None:
+                print(f"  Configured interval: {self.capture_interval_label}")
+            else:
+                inferred_interval = self._infer_interval_label(images)
+                if inferred_interval is not None:
+                    print(f"  Inferred interval: {inferred_interval}")
         else:
             print("  Slice width per image: n/a")
         print(f"  Source slice thickness: {self.slice_thickness_px} px")
@@ -788,13 +1094,13 @@ def parse_args():
     parser.add_argument(
         "--images-per-day",
         type=int,
-        default=96,
-        help="Expected captures per day (24 for hourly, 48 for every 30 min)",
+        default=55,
+        help="Expected captures per day (default 55 for 07:00-16:00 at 10-minute captures)",
     )
     parser.add_argument(
         "--target-kymo-width",
         type=int,
-        default=1440,
+        default=825,
         help="Target kymograph width in pixels; slice width per image scales from this and images-per-day",
     )
     parser.add_argument("--max-images", type=int, default=None, help="Optional cap on images used")
@@ -826,6 +1132,11 @@ def parse_args():
         "--capture-window-label",
         default=None,
         help="Optional capture window label shown in the header side panel",
+    )
+    parser.add_argument(
+        "--capture-interval-label",
+        default=None,
+        help="Optional capture interval label shown in header metadata (example: 10m)",
     )
     parser.add_argument(
         "--slice-rows",
@@ -946,6 +1257,7 @@ def main():
         header_photo_max_height=args.header_photo_max_height,
         header_photo_width_ratio=args.header_photo_width_ratio,
         capture_window_label=args.capture_window_label,
+        capture_interval_label=args.capture_interval_label,
     )
 
     output_parent = Path(args.output_path).parent

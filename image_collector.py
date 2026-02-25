@@ -1,4 +1,5 @@
 import argparse
+import math
 import time
 from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
@@ -30,8 +31,8 @@ def parse_args():
     parser.add_argument(
         "--interval-seconds",
         type=int,
-        default=900,
-        help="Capture interval in seconds (3600 hourly, 1800 every 30 minutes)",
+        default=600,
+        help="Capture interval in seconds (3600 hourly, 1800 every 30 minutes, 600 every 10 minutes)",
     )
     parser.add_argument("--slices-dir", default="KymoSlices", help="Folder for captured source images")
     parser.add_argument("--kymoday-dir", default="KymoDay", help="Folder for daily merged kymograph images")
@@ -44,8 +45,8 @@ def parse_args():
     parser.add_argument(
         "--target-kymo-width",
         type=int,
-        default=1440,
-        help="Target daily kymograph width in pixels",
+        default=825,
+        help="Target daily kymograph width in pixels (825 gives 15px per image for 55 captures/day)",
     )
     parser.add_argument(
         "--slice-preview-path",
@@ -157,7 +158,7 @@ def parse_args():
     parser.add_argument(
         "--capture-start",
         default="07:00",
-        help="Local start time for captures in HH:MM (default 09:00)",
+        help="Local start time for captures in HH:MM (default 07:00)",
     )
     parser.add_argument(
         "--capture-end",
@@ -167,11 +168,35 @@ def parse_args():
     return parser.parse_args()
 
 
-def infer_images_per_day(interval_seconds, explicit_value):
+def infer_images_per_day(interval_seconds, explicit_value, start_time=None, end_time=None):
     if explicit_value is not None:
         return max(1, int(explicit_value))
+
+    if start_time is not None and end_time is not None:
+        start_minutes = start_time.hour * 60 + start_time.minute
+        end_minutes = end_time.hour * 60 + end_time.minute
+        if end_minutes > start_minutes:
+            interval = max(1, int(interval_seconds))
+            window_seconds = (end_minutes - start_minutes) * 60
+            return max(1, int(window_seconds // interval) + 1)
+
     interval = max(1, int(interval_seconds))
     return max(1, int(round(86400 / float(interval))))
+
+
+def format_interval_label(interval_seconds):
+    interval = max(1, int(interval_seconds))
+    if interval % 3600 == 0:
+        return f"{interval // 3600}h"
+    if interval >= 3600:
+        hours = interval // 3600
+        minutes = (interval % 3600) // 60
+        if minutes == 0:
+            return f"{hours}h"
+        return f"{hours}h{minutes}m"
+    if interval % 60 == 0:
+        return f"{interval // 60}m"
+    return f"{interval}s"
 
 
 def capture_image(image_url, destination_path, timeout_seconds):
@@ -221,6 +246,38 @@ def seconds_until_next_window(now_local, start_time, end_time):
         return 0
 
     return max(1, int((target - now_local).total_seconds()))
+
+
+def next_capture_time(now_local, start_time, end_time, interval_seconds, grace_seconds=2):
+    interval = max(1, int(interval_seconds))
+    grace = max(0, int(grace_seconds))
+
+    today_start = now_local.replace(
+        hour=start_time.hour,
+        minute=start_time.minute,
+        second=0,
+        microsecond=0,
+    )
+    today_end = now_local.replace(
+        hour=end_time.hour,
+        minute=end_time.minute,
+        second=0,
+        microsecond=0,
+    )
+
+    if now_local < today_start:
+        return today_start
+    if now_local > today_end:
+        return None
+
+    elapsed_seconds = max(0.0, (now_local - today_start).total_seconds())
+    slot_index = int(math.ceil((elapsed_seconds - float(grace)) / float(interval)))
+    slot_index = max(0, slot_index)
+    candidate = today_start + timedelta(seconds=slot_index * interval)
+
+    if candidate > today_end:
+        return None
+    return candidate
 
 
 def build_daily_kymograph(
@@ -276,7 +333,12 @@ def main():
     slices_dir.mkdir(parents=True, exist_ok=True)
     kymoday_dir.mkdir(parents=True, exist_ok=True)
 
-    images_per_day = infer_images_per_day(args.interval_seconds, args.images_per_day)
+    images_per_day = infer_images_per_day(
+        args.interval_seconds,
+        args.images_per_day,
+        start_time=window_start,
+        end_time=window_end,
+    )
     tool = VisualReviewTool(
         slice_angle_deg=args.slice_angle_deg,
         slice_angle_from_horizontal_deg=args.slice_angle_horizontal_deg,
@@ -296,11 +358,12 @@ def main():
         header_photo_max_height=args.header_photo_max_height,
         header_photo_width_ratio=args.header_photo_width_ratio,
         capture_window_label=f"{window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} PT",
+        capture_interval_label=format_interval_label(args.interval_seconds),
     )
 
     print(f"Collecting to: {slices_dir}")
     print(f"Daily outputs: {kymoday_dir}")
-    print(f"Interval: {args.interval_seconds}s | images/day: {images_per_day}")
+    print(f"Interval: {args.interval_seconds}s ({format_interval_label(args.interval_seconds)}) | images/day: {images_per_day}")
     display_slice_width = VisualReviewTool._slice_width(images_per_day, args.target_kymo_width)
     if manual_row_lines is not None:
         row_config = f"manual row lines={len(manual_row_lines)}"
@@ -315,6 +378,9 @@ def main():
 
     active_day = datetime.now(PACIFIC_TZ).strftime("%Y-%m-%d")
     last_built_day = None
+    last_capture_slot = None
+
+    print("Clock-aligned capture schedule enabled.")
 
     try:
         while True:
@@ -359,7 +425,30 @@ def main():
                     last_built_day = active_day
                 active_day = day_key
 
-            file_name = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
+            scheduled_capture = next_capture_time(
+                now_local=now,
+                start_time=window_start,
+                end_time=window_end,
+                interval_seconds=args.interval_seconds,
+            )
+            if scheduled_capture is None:
+                time.sleep(1)
+                continue
+
+            wait_seconds = (scheduled_capture - now).total_seconds()
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+
+            slot_key = scheduled_capture.strftime("%Y-%m-%d_%H-%M")
+            if slot_key == last_capture_slot:
+                time.sleep(1)
+                continue
+
+            capture_now = datetime.now(PACIFIC_TZ)
+            if not is_within_window(capture_now, window_start, window_end):
+                continue
+
+            file_name = f"{scheduled_capture.strftime('%Y-%m-%d_%H-%M-%S')}.jpg"
             destination = slices_dir / file_name
 
             try:
@@ -367,8 +456,8 @@ def main():
                 print(f"Captured: {destination.name}")
             except Exception as exc:
                 print(f"Capture failed at {now.isoformat()}: {exc}")
-
-            time.sleep(max(1, int(args.interval_seconds)))
+            finally:
+                last_capture_slot = slot_key
     except KeyboardInterrupt:
         print("\nStopping collector. Building current-day kymograph before exit...")
         if last_built_day != active_day:
