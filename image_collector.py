@@ -156,7 +156,7 @@ def parse_args():
     parser.add_argument("--timeout-seconds", type=int, default=20, help="HTTP request timeout")
     parser.add_argument(
         "--capture-start",
-        default="08:00",
+        default="07:00",
         help="Local start time for captures in HH:MM (default 09:00)",
     )
     parser.add_argument(
