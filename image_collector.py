@@ -18,6 +18,10 @@ from CreateKymograph import (
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 
+# Simple top-level interval controls
+IMAGE_CAPTURE_INTERVAL_SECONDS = 300
+KYMOGRAPH_UPDATE_INTERVAL_SECONDS = 1200
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -31,8 +35,14 @@ def parse_args():
     parser.add_argument(
         "--interval-seconds",
         type=int,
-        default=600,
+        default=IMAGE_CAPTURE_INTERVAL_SECONDS,
         help="Capture interval in seconds (3600 hourly, 1800 every 30 minutes, 600 every 10 minutes)",
+    )
+    parser.add_argument(
+        "--kymograph-update-interval-seconds",
+        type=int,
+        default=KYMOGRAPH_UPDATE_INTERVAL_SECONDS,
+        help="How often to rebuild the day kymograph while collecting (1200 = every 20 minutes, 600 = every 10 minutes)",
     )
     parser.add_argument("--slices-dir", default="KymoSlices", help="Folder for captured source images")
     parser.add_argument("--kymoday-dir", default="KymoDay", help="Folder for daily merged kymograph images")
@@ -310,6 +320,8 @@ def build_daily_kymograph(
 
 def main():
     args = parse_args()
+    args.interval_seconds = max(1, int(args.interval_seconds))
+    args.kymograph_update_interval_seconds = max(1, int(args.kymograph_update_interval_seconds))
 
     manual_row_lines = None
     if args.slice_row_starts or args.slice_row_ends:
@@ -364,6 +376,11 @@ def main():
     print(f"Collecting to: {slices_dir}")
     print(f"Daily outputs: {kymoday_dir}")
     print(f"Interval: {args.interval_seconds}s ({format_interval_label(args.interval_seconds)}) | images/day: {images_per_day}")
+    print(
+        "Live kymograph updates: "
+        f"every {args.kymograph_update_interval_seconds}s "
+        f"({format_interval_label(args.kymograph_update_interval_seconds)})"
+    )
     display_slice_width = VisualReviewTool._slice_width(images_per_day, args.target_kymo_width)
     if manual_row_lines is not None:
         row_config = f"manual row lines={len(manual_row_lines)}"
@@ -379,6 +396,7 @@ def main():
     active_day = datetime.now(PACIFIC_TZ).strftime("%Y-%m-%d")
     last_built_day = None
     last_capture_slot = None
+    last_kymograph_slot = None
 
     print("Clock-aligned capture schedule enabled.")
 
@@ -424,6 +442,7 @@ def main():
                     )
                     last_built_day = active_day
                 active_day = day_key
+                last_kymograph_slot = None
 
             scheduled_capture = next_capture_time(
                 now_local=now,
@@ -431,13 +450,60 @@ def main():
                 end_time=window_end,
                 interval_seconds=args.interval_seconds,
             )
-            if scheduled_capture is None:
+            scheduled_kymograph = next_capture_time(
+                now_local=now,
+                start_time=window_start,
+                end_time=window_end,
+                interval_seconds=args.kymograph_update_interval_seconds,
+            )
+
+            next_events = [event_time for event_time in (scheduled_capture, scheduled_kymograph) if event_time is not None]
+            if not next_events:
                 time.sleep(1)
                 continue
 
-            wait_seconds = (scheduled_capture - now).total_seconds()
+            next_event_time = min(next_events)
+            wait_seconds = (next_event_time - now).total_seconds()
             if wait_seconds > 0:
                 time.sleep(wait_seconds)
+
+            now = datetime.now(PACIFIC_TZ)
+            day_key = now.strftime("%Y-%m-%d")
+            if not is_within_window(now, window_start, window_end):
+                continue
+
+            scheduled_capture = next_capture_time(
+                now_local=now,
+                start_time=window_start,
+                end_time=window_end,
+                interval_seconds=args.interval_seconds,
+            )
+            scheduled_kymograph = next_capture_time(
+                now_local=now,
+                start_time=window_start,
+                end_time=window_end,
+                interval_seconds=args.kymograph_update_interval_seconds,
+            )
+
+            if scheduled_kymograph is not None:
+                kymograph_slot_key = scheduled_kymograph.strftime("%Y-%m-%d_%H-%M-%S")
+                kymo_due_seconds = (now - scheduled_kymograph).total_seconds()
+                if kymo_due_seconds >= 0 and kymograph_slot_key != last_kymograph_slot:
+                    build_daily_kymograph(
+                        day_key=day_key,
+                        slices_dir=slices_dir,
+                        kymoday_dir=kymoday_dir,
+                        tool=tool,
+                        images_per_day=images_per_day,
+                        target_kymo_width=args.target_kymo_width,
+                        slice_preview_path=args.slice_preview_path,
+                        preview_show_clip_guides=args.slice_preview_show_clip_guides,
+                    )
+                    last_kymograph_slot = kymograph_slot_key
+
+            if scheduled_capture is None:
+                time.sleep(1)
+                continue
 
             slot_key = scheduled_capture.strftime("%Y-%m-%d_%H-%M")
             if slot_key == last_capture_slot:
