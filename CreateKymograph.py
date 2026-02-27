@@ -10,6 +10,9 @@ DEFAULT_SLICE_START = "1080,300"
 DEFAULT_SLICE_END = "1260,500"
 DEFAULT_SLICE_ROW_STARTS = "1000,390;1100,350;1200,310"
 DEFAULT_SLICE_ROW_ENDS = "1100,470;1200,430;1300,390"
+DEFAULT_ROW_LABEL_WIDTH_PX = 20
+FINAL_IMAGE_PADDING_PX = 15
+SLICE_PLOT_BORDER_PX = 2
 
 
 class VisualReviewTool:
@@ -418,18 +421,28 @@ class VisualReviewTool:
 
     @staticmethod
     def _build_row_labeled_kymograph(row_kymographs):
-        separator_height = 4
+        separator_height = 2
         parts = []
 
         for row_idx, row_img in enumerate(row_kymographs, start=1):
-            bordered = cv2.copyMakeBorder(row_img, 1, 1, 0, 0, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-            parts.append(bordered)
+            parts.append(row_img)
 
             if row_idx < len(row_kymographs):
-                separator = np.zeros((separator_height, bordered.shape[1], 3), dtype=np.uint8)
+                separator = np.zeros((separator_height, row_img.shape[1], 3), dtype=np.uint8)
                 parts.append(separator)
 
         body = np.vstack(parts)
+        border = max(0, int(SLICE_PLOT_BORDER_PX))
+        if border > 0:
+            body = cv2.copyMakeBorder(
+                body,
+                border,
+                border,
+                border,
+                border,
+                cv2.BORDER_CONSTANT,
+                value=(0, 0, 0),
+            )
         return body
 
     @staticmethod
@@ -566,9 +579,13 @@ class VisualReviewTool:
 
         outer_pad = 12
         center_gap = 12
-        available_w = max(220, panel_width - (2 * outer_pad) - center_gap)
-        left_w = max(120, int(round(available_w * 0.56)))
-        right_w = max(100, available_w - left_w)
+        available_w = max(220, panel_width - (2 * outer_pad))
+        content_w = int(round(available_w * self.header_photo_width_ratio))
+        content_w = max(220, min(available_w, content_w))
+        content_left = outer_pad + max(0, (available_w - content_w) // 2)
+        image_columns_w = max(200, content_w - center_gap)
+        left_w = max(100, image_columns_w // 2)
+        right_w = max(100, image_columns_w - left_w)
 
         info_height = 108
         right_image_max_height = max(120, int(self.header_photo_max_height))
@@ -629,7 +646,8 @@ class VisualReviewTool:
                 supersample=2,
             )
 
-        left_x = outer_pad + max(0, (left_w - left_image.shape[1]) // 2)
+        left_column_x = content_left
+        left_x = left_column_x + max(0, (left_w - left_image.shape[1]) // 2)
         left_y = outer_pad + info_height + 10 + max(0, (images_height - left_image.shape[0]) // 2)
         panel[left_y : left_y + left_image.shape[0], left_x : left_x + left_image.shape[1]] = left_image
         cv2.rectangle(
@@ -640,7 +658,7 @@ class VisualReviewTool:
             2,
         )
 
-        right_column_x = outer_pad + left_w + center_gap
+        right_column_x = left_column_x + left_w + center_gap
         right_x = right_column_x + max(0, (right_w - right_image.shape[1]) // 2)
         right_y = outer_pad + info_height + 10 + max(0, (images_height - right_image.shape[0]) // 2)
         panel[right_y : right_y + right_image.shape[0], right_x : right_x + right_image.shape[1]] = right_image
@@ -657,7 +675,9 @@ class VisualReviewTool:
     def _slice_width(images_per_day, target_kymo_width):
         per_day = max(1, int(images_per_day))
         target = max(200, int(target_kymo_width))
-        return max(1, int(round(target / (per_day + 1))))
+        label_width = min(DEFAULT_ROW_LABEL_WIDTH_PX, max(1, target - per_day))
+        usable_width = max(per_day, target - label_width)
+        return max(1, int(round(usable_width / per_day)))
 
     @staticmethod
     def _fit_row_to_target_width(strips, target_kymo_width, row_label_text=None):
@@ -672,7 +692,7 @@ class VisualReviewTool:
 
         resized_strips = []
         if include_label_slot:
-            label_width = max(1, int(target_widths[0]))
+            label_width = min(DEFAULT_ROW_LABEL_WIDTH_PX, max(1, target_width - len(strips)))
             label_strip = np.full((strips[0].shape[0], label_width, 3), 235, dtype=np.uint8)
             text = str(row_label_text)
             (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
@@ -689,7 +709,10 @@ class VisualReviewTool:
                 supersample=2,
             )
             resized_strips.append(label_strip)
-            strip_target_widths = target_widths[1:]
+            strip_target_widths = VisualReviewTool._slot_widths(
+                total_width=max(1, target_width - label_width),
+                slot_count=len(strips),
+            )
         else:
             strip_target_widths = target_widths
 
@@ -720,27 +743,39 @@ class VisualReviewTool:
         if valid_count < 2:
             return kymograph_image
 
-        width = max(1, int(target_kymo_width))
-        if kymograph_image.shape[1] != width:
-            return kymograph_image
+        total_width = max(1, int(kymograph_image.shape[1]))
+        target_width = max(1, int(target_kymo_width))
+        side_border = max(0, int(SLICE_PLOT_BORDER_PX))
+        if total_width < (2 * side_border) + 1:
+            side_border = 0
+
+        if total_width != target_width + (2 * side_border):
+            side_border = 0
+
+        content_left = side_border
+        content_width = max(1, total_width - (2 * side_border))
 
         axis_h = 56
-        axis = np.full((axis_h, width, 3), 255, dtype=np.uint8)
+        axis = np.full((axis_h, total_width, 3), 255, dtype=np.uint8)
         baseline_y = 1
         tick_len = 8
-        cv2.line(axis, (0, baseline_y), (width - 1, baseline_y), (0, 0, 0), 1, cv2.LINE_AA)
+        baseline_x0 = content_left
+        baseline_x1 = max(content_left, content_left + content_width - 1)
+        cv2.line(axis, (baseline_x0, baseline_y), (baseline_x1, baseline_y), (0, 0, 0), 1, cv2.LINE_AA)
 
-        slot_count = len(image_paths) + 1
-        slot_widths = VisualReviewTool._slot_widths(total_width=width, slot_count=slot_count)
-        left_edges = [0]
+        label_width = min(DEFAULT_ROW_LABEL_WIDTH_PX, max(1, content_width - len(image_paths)))
+        slot_widths = VisualReviewTool._slot_widths(
+            total_width=max(1, content_width - label_width),
+            slot_count=len(image_paths),
+        )
+        left_edges = [content_left + label_width]
         for slot_w in slot_widths[:-1]:
             left_edges.append(left_edges[-1] + slot_w)
 
         previous_labeled_hour = None
         for idx in range(len(image_paths)):
-            slot_idx = idx + 1
-            x0 = left_edges[slot_idx]
-            w = slot_widths[slot_idx]
+            x0 = left_edges[idx]
+            w = slot_widths[idx]
             center_x = int(round(x0 + (w / 2.0)))
             cv2.line(axis, (center_x, baseline_y), (center_x, baseline_y + tick_len), (0, 0, 0), 1, cv2.LINE_AA)
 
@@ -753,7 +788,7 @@ class VisualReviewTool:
 
             label = ts.strftime("%H")
             (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
-            text_x = int(np.clip(center_x - (text_w // 2), 0, max(0, width - text_w - 1)))
+            text_x = int(np.clip(center_x - (text_w // 2), 0, max(0, total_width - text_w - 1)))
             preferred_y = baseline_y + tick_len + 8 + text_h
             text_y = int(min(axis_h - 4, preferred_y))
             VisualReviewTool._put_text_supersampled(
@@ -770,7 +805,7 @@ class VisualReviewTool:
 
         axis_title = "Time PT"
         (title_w, title_h), _ = cv2.getTextSize(axis_title, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 2)
-        title_x = max(2, (width - title_w) // 2)
+        title_x = max(2, (total_width - title_w) // 2)
         title_y = max(title_h + 2, axis_h - 4)
         VisualReviewTool._put_text_supersampled(
             axis,
@@ -901,7 +936,7 @@ class VisualReviewTool:
         image_paths,
         output_path="kymograph.jpg",
         images_per_day=24,
-        target_kymo_width=2400,
+        target_kymo_width=1200,
         preview_path=None,
         preview_show_clip_guides=False,
     ):
@@ -997,18 +1032,32 @@ class VisualReviewTool:
                 capture_label=inferred_capture_label,
                 interval_label=interval_label,
             )
-            divider = np.zeros((4, kymograph.shape[1], 3), dtype=np.uint8)
+            divider = np.full((4, kymograph.shape[1], 3), 255, dtype=np.uint8)
             kymograph = np.vstack([top_panel, divider, kymograph])
+
+        pad = max(0, int(FINAL_IMAGE_PADDING_PX))
+        if pad > 0:
+            kymograph = cv2.copyMakeBorder(
+                kymograph,
+                pad,
+                pad,
+                pad,
+                pad,
+                borderType=cv2.BORDER_CONSTANT,
+                value=(255, 255, 255),
+            )
 
         cv2.imwrite(output_path, kymograph)
 
         print(f"✓ Kymograph saved: {output_path}")
         print(f"  Images used: {len(processed)}")
         if processed:
-            dynamic_slice_width = float(max(200, int(target_kymo_width))) / float(len(processed) + 1)
+            output_width = max(200, int(target_kymo_width))
+            label_width = min(DEFAULT_ROW_LABEL_WIDTH_PX, max(1, output_width - len(processed)))
+            dynamic_slice_width = float(max(1, output_width - label_width)) / float(len(processed))
             print(
                 f"  Slice width per image: {dynamic_slice_width:.2f} px "
-                f"(dynamic fit to {max(200, int(target_kymo_width))}px, +1 label slot)"
+                f"(dynamic fit to {output_width}px, {label_width}px label slot)"
             )
             capture_range_label = self.capture_window_label if self.capture_window_label else self._infer_capture_label(images)
             if capture_range_label is not None:
@@ -1035,7 +1084,7 @@ class VisualReviewTool:
         image_folder,
         output_path="kymograph.jpg",
         images_per_day=24,
-        target_kymo_width=2400,
+        target_kymo_width=1200,
         max_images=None,
         preview_path=None,
         preview_show_clip_guides=False,
@@ -1057,7 +1106,7 @@ class VisualReviewTool:
         image_paths,
         output_path="kymograph.jpg",
         images_per_day=24,
-        target_kymo_width=2400,
+        target_kymo_width=1200,
         max_images=None,
         preview_path=None,
         preview_show_clip_guides=False,
@@ -1100,7 +1149,7 @@ def parse_args():
     parser.add_argument(
         "--target-kymo-width",
         type=int,
-        default=825,
+        default=1200,
         help="Target kymograph width in pixels; slice width per image scales from this and images-per-day",
     )
     parser.add_argument("--max-images", type=int, default=None, help="Optional cap on images used")

@@ -55,8 +55,8 @@ def parse_args():
     parser.add_argument(
         "--target-kymo-width",
         type=int,
-        default=825,
-        help="Target daily kymograph width in pixels (825 gives 15px per image for 55 captures/day)",
+        default=1200,
+        help="Target daily kymograph width in pixels (1200 gives ~22px per image for 55 captures/day)",
     )
     parser.add_argument(
         "--slice-preview-path",

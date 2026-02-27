@@ -67,7 +67,7 @@ def parse_args():
     parser.add_argument(
         "--target-kymo-width",
         type=int,
-        default=825,
+        default=1200,
         help="Target output kymograph width",
     )
     parser.add_argument(
