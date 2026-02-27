@@ -1,41 +1,55 @@
 import argparse
 import os
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from CreateKymograph import VisualReviewTool
-from image_collector import build_daily_kymograph, infer_images_per_day
+from CreateKymograph import (
+    DEFAULT_SLICE_END,
+    DEFAULT_SLICE_ROW_ENDS,
+    DEFAULT_SLICE_ROW_STARTS,
+    DEFAULT_SLICE_START,
+    VisualReviewTool,
+)
+from image_collector import (
+    build_daily_kymograph,
+    format_interval_label,
+    infer_images_per_day,
+    parse_hhmm,
+)
+
+
+REQUIRED_R2_ENV_VARS = (
+    "R2_ACCOUNT_ID",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Download UTC day(s) of webcam images from Cloudflare R2 into KymoSlices and optionally build kymographs."
+        description=(
+            "Download one UTC date or date range from Cloudflare R2 and build kymographs. "
+            "Accepts one date for a single day, or two dates for an inclusive range."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  python run_kymograph.py 2-26-2026\n"
+            "  python run_kymograph.py 2-25-2026 2-26-2026\n"
+            "  python run_kymograph.py 2-26-2026 --bucket beachkymographs\n"
+            "  python run_kymograph.py 2-26-2026 --skip-build"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
-        "--date",
-        default=None,
-        help="UTC date to sync in YYYY-MM-DD format (example: 2026-02-26)",
-    )
-    parser.add_argument(
-        "--start-date",
-        default=None,
-        help="Range start date in YYYY-MM-DD (inclusive)",
-    )
-    parser.add_argument(
-        "--end-date",
-        default=None,
-        help="Range end date in YYYY-MM-DD (inclusive)",
-    )
-    parser.add_argument(
-        "--last-days",
-        type=int,
-        default=None,
-        help="Sync this many UTC days ending today (example: 7)",
+        "dates",
+        nargs="+",
+        help="One date (MM-DD-YYYY) or two dates (MM-DD-YYYY MM-DD-YYYY)",
     )
     parser.add_argument(
         "--bucket",
-        default=os.getenv("R2_BUCKET", "beachkymograph"),
-        help="R2 bucket name (default from R2_BUCKET env, else beachkymograph)",
+        default=os.getenv("R2_BUCKET", "beachkymographs"),
+        help="R2 bucket name (default from R2_BUCKET env, else beachkymographs)",
     )
     parser.add_argument(
         "--prefix-root",
@@ -56,13 +70,23 @@ def parse_args():
         "--interval-seconds",
         type=int,
         default=300,
-        help="Capture interval in seconds used to estimate images/day for build settings",
+        help="Capture interval in seconds used for labels/images per day",
     )
     parser.add_argument(
         "--images-per-day",
         type=int,
         default=None,
         help="Override expected images/day",
+    )
+    parser.add_argument(
+        "--capture-start",
+        default="07:00",
+        help="Capture window start in HH:MM PT (default 07:00)",
+    )
+    parser.add_argument(
+        "--capture-end",
+        default="16:00",
+        help="Capture window end in HH:MM PT (default 16:00)",
     )
     parser.add_argument(
         "--target-kymo-width",
@@ -74,7 +98,7 @@ def parse_args():
         "--download-limit",
         type=int,
         default=None,
-        help="Optional max number of images to download",
+        help="Optional max number of images to download per day",
     )
     parser.add_argument(
         "--overwrite",
@@ -89,40 +113,32 @@ def parse_args():
     return parser.parse_args()
 
 
-def parse_day_key(value):
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
-    except ValueError as exc:
-        raise ValueError("--date must be in YYYY-MM-DD format") from exc
-
-
-def date_range_from_args(args):
-    mode_count = sum(
-        [
-            args.date is not None,
-            args.last_days is not None,
-            (args.start_date is not None or args.end_date is not None),
-        ]
+def normalize_date_input(date_value):
+    normalized = date_value.strip().replace("/", "-")
+    for fmt in ("%m-%d-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(normalized, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    raise ValueError(
+        f"Invalid date '{date_value}'. Use MM-DD-YYYY (example: 2-26-2026) or YYYY-MM-DD."
     )
-    if mode_count != 1:
-        raise ValueError("Choose exactly one mode: --date, --last-days, or --start-date/--end-date")
 
-    if args.date is not None:
-        day_key = parse_day_key(args.date)
-        return [day_key]
 
-    if args.last_days is not None:
-        days = max(1, int(args.last_days))
-        end_dt = datetime.utcnow().date()
-        start_dt = end_dt - timedelta(days=days - 1)
-    else:
-        if args.start_date is None or args.end_date is None:
-            raise ValueError("--start-date and --end-date must be provided together")
-        start_dt = datetime.strptime(parse_day_key(args.start_date), "%Y-%m-%d").date()
-        end_dt = datetime.strptime(parse_day_key(args.end_date), "%Y-%m-%d").date()
+def expand_dates(raw_dates):
+    if len(raw_dates) == 1 and " " in raw_dates[0].strip():
+        raw_dates = [part for part in raw_dates[0].split() if part]
+    if len(raw_dates) not in (1, 2):
+        raise ValueError("Provide one date or two dates (start and end).")
+    return raw_dates
 
+
+def normalized_day_keys(raw_dates):
+    parsed = [datetime.strptime(normalize_date_input(value), "%Y-%m-%d").date() for value in expand_dates(raw_dates)]
+    start_dt = parsed[0]
+    end_dt = parsed[-1]
     if start_dt > end_dt:
-        raise ValueError("start date must be <= end date")
+        raise ValueError("Start date must be on or before end date.")
 
     out = []
     cursor = start_dt
@@ -132,11 +148,32 @@ def date_range_from_args(args):
     return out
 
 
-def require_env(var_name):
-    value = os.getenv(var_name)
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {var_name}")
-    return value
+def load_env_file(env_path):
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def ensure_required_env():
+    missing = [name for name in REQUIRED_R2_ENV_VARS if not os.getenv(name)]
+    if missing:
+        missing_joined = ", ".join(missing)
+        raise RuntimeError(
+            "Missing required R2 environment values: "
+            f"{missing_joined}.\n"
+            "Copy .env.example to .env and fill in your Cloudflare R2 credentials, "
+            "or export them in your shell."
+        )
 
 
 def build_r2_client():
@@ -145,16 +182,12 @@ def build_r2_client():
     except ImportError as exc:
         raise RuntimeError("boto3 is required. Install with: pip install boto3") from exc
 
-    account_id = require_env("R2_ACCOUNT_ID")
-    access_key_id = require_env("R2_ACCESS_KEY_ID")
-    secret_access_key = require_env("R2_SECRET_ACCESS_KEY")
-
-    endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+    endpoint_url = f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com"
     return boto3.client(
         "s3",
         endpoint_url=endpoint_url,
-        aws_access_key_id=access_key_id,
-        aws_secret_access_key=secret_access_key,
+        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
         region_name="auto",
     )
 
@@ -215,12 +248,49 @@ def download_day_images(client, bucket, prefix, day_key, slices_dir, download_li
 
 def main():
     args = parse_args()
-    day_keys = date_range_from_args(args)
+
+    try:
+        day_keys = normalized_day_keys(args.dates)
+        load_env_file(Path(__file__).with_name(".env"))
+        ensure_required_env()
+
+        window_start = parse_hhmm(args.capture_start)
+        window_end = parse_hhmm(args.capture_end)
+        if window_start >= window_end:
+            raise ValueError("capture-start must be earlier than capture-end (same day window).")
+    except (ValueError, RuntimeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
     client = build_r2_client()
     slices_dir = Path(args.slices_dir)
     kymoday_dir = Path(args.kymoday_dir)
     kymoday_dir.mkdir(parents=True, exist_ok=True)
+
+    images_per_day = infer_images_per_day(
+        interval_seconds=max(1, int(args.interval_seconds)),
+        explicit_value=args.images_per_day,
+        start_time=window_start,
+        end_time=window_end,
+    )
+
+    row_starts = VisualReviewTool._parse_point_list(DEFAULT_SLICE_ROW_STARTS)
+    row_ends = VisualReviewTool._parse_point_list(DEFAULT_SLICE_ROW_ENDS)
+    manual_row_lines = (
+        list(zip(row_starts, row_ends)) if row_starts and row_ends and len(row_starts) == len(row_ends) else None
+    )
+
+    tool = VisualReviewTool(
+        slice_start=VisualReviewTool._parse_point(DEFAULT_SLICE_START),
+        slice_end=VisualReviewTool._parse_point(DEFAULT_SLICE_END),
+        slice_row_lines=manual_row_lines,
+        slice_rows=(len(manual_row_lines) if manual_row_lines else 3),
+        slice_thickness_px=15,
+        header_photo_max_height=260,
+        header_photo_width_ratio=1.0,
+        capture_window_label=f"{window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} PT",
+        capture_interval_label=format_interval_label(args.interval_seconds),
+    )
 
     print(f"R2 bucket: {args.bucket}")
     print(f"Local slices dir: {slices_dir}")
@@ -230,14 +300,6 @@ def main():
     total_downloaded = 0
     total_skipped_existing = 0
     built_count = 0
-
-    images_per_day = infer_images_per_day(
-        interval_seconds=max(1, int(args.interval_seconds)),
-        explicit_value=args.images_per_day,
-        start_time=None,
-        end_time=None,
-    )
-    tool = VisualReviewTool()
 
     for day_key in day_keys:
         prefix = r2_prefix(args.prefix_root, day_key)
@@ -286,6 +348,7 @@ def main():
         print("Build skipped for all days (--skip-build).")
     else:
         print(f"Kymographs built: {built_count}/{len(day_keys)}")
+    raise SystemExit(0)
 
 
 if __name__ == "__main__":

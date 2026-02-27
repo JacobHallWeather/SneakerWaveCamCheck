@@ -8,3 +8,4 @@ KymoDay/*
 !KymoSlices/.gitkeep
 !KymoDay/.gitkeep
 image_*.jpg
+.env
