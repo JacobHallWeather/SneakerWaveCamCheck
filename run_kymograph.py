@@ -13,7 +13,6 @@ from CreateKymograph import (
 )
 from image_collector import (
     build_daily_kymograph,
-    format_interval_label,
     infer_images_per_day,
     parse_hhmm,
 )
@@ -288,8 +287,6 @@ def main():
         slice_thickness_px=15,
         header_photo_max_height=260,
         header_photo_width_ratio=1.0,
-        capture_window_label=f"{window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} PT",
-        capture_interval_label=format_interval_label(args.interval_seconds),
     )
 
     print(f"R2 bucket: {args.bucket}")

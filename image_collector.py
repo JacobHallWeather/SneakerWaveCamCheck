@@ -369,8 +369,6 @@ def main():
         slice_row_lines=manual_row_lines,
         header_photo_max_height=args.header_photo_max_height,
         header_photo_width_ratio=args.header_photo_width_ratio,
-        capture_window_label=f"{window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} PT",
-        capture_interval_label=format_interval_label(args.interval_seconds),
     )
 
     print(f"Collecting to: {slices_dir}")

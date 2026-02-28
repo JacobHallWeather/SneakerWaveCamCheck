@@ -1,6 +1,7 @@
 import argparse
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
@@ -13,6 +14,8 @@ DEFAULT_SLICE_ROW_ENDS = "1100,470;1200,430;1300,390"
 DEFAULT_ROW_LABEL_WIDTH_PX = 20
 FINAL_IMAGE_PADDING_PX = 15
 SLICE_PLOT_BORDER_PX = 2
+PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
+UTC_TZ = ZoneInfo("UTC")
 
 
 class VisualReviewTool:
@@ -351,12 +354,21 @@ class VisualReviewTool:
     @staticmethod
     def _infer_date_label(image_paths):
         if not image_paths:
-            return datetime.now().strftime("%Y-%m-%d")
+            return f"{datetime.now(UTC_TZ).strftime('%Y/%m/%d')} UTC"
+
+        parsed_times = VisualReviewTool._parsed_capture_times(image_paths)
+        if parsed_times:
+            parsed_times = sorted(parsed_times)
+            start_date = parsed_times[0].strftime("%Y/%m/%d")
+            end_date = parsed_times[-1].strftime("%Y/%m/%d")
+            if start_date == end_date:
+                return f"{start_date} UTC"
+            return f"{start_date} - {end_date} UTC"
 
         candidate = Path(image_paths[0]).stem.split("_")[0]
         try:
             parsed = datetime.strptime(candidate, "%Y-%m-%d")
-            return parsed.strftime("%Y-%m-%d")
+            return f"{parsed.strftime('%Y/%m/%d')} UTC"
         except ValueError:
             return candidate
 
@@ -365,35 +377,22 @@ class VisualReviewTool:
         if not image_paths:
             return None
 
-        parsed_times = []
-        for path in image_paths:
-            stem = Path(path).stem
-            try:
-                parsed = datetime.strptime(stem, "%Y-%m-%d_%H-%M-%S")
-                parsed_times.append(parsed)
-            except ValueError:
-                continue
+        parsed_times = VisualReviewTool._parsed_capture_times(image_paths)
 
         if not parsed_times:
             return None
 
-        start = min(parsed_times)
-        end = max(parsed_times)
-        return f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+        parsed_times = sorted(parsed_times)
+        start = parsed_times[0]
+        end = parsed_times[-1]
+        return f"{start.strftime('%H:%M')} - {end.strftime('%H:%M')} UTC"
 
     @staticmethod
     def _infer_interval_label(image_paths):
         if not image_paths:
             return None
 
-        parsed_times = []
-        for path in image_paths:
-            stem = Path(path).stem
-            try:
-                parsed_times.append(datetime.strptime(stem, "%Y-%m-%d_%H-%M-%S"))
-            except ValueError:
-                continue
-
+        parsed_times = VisualReviewTool._parsed_capture_times(image_paths)
         if len(parsed_times) < 2:
             return None
 
@@ -418,6 +417,28 @@ class VisualReviewTool:
         if interval_seconds % 60 == 0:
             return f"{interval_seconds // 60}m"
         return f"{interval_seconds}s"
+
+    @staticmethod
+    def _parse_capture_datetime(path):
+        stem = Path(path).stem
+        tokens = stem.split("_")
+        for idx in range(max(0, len(tokens) - 1)):
+            candidate = f"{tokens[idx]}_{tokens[idx + 1]}"
+            try:
+                parsed_local = datetime.strptime(candidate, "%Y-%m-%d_%H-%M-%S")
+                return parsed_local.replace(tzinfo=PACIFIC_TZ).astimezone(UTC_TZ)
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _parsed_capture_times(image_paths):
+        parsed_times = []
+        for path in image_paths:
+            parsed = VisualReviewTool._parse_capture_datetime(path)
+            if parsed is not None:
+                parsed_times.append(parsed)
+        return parsed_times
 
     @staticmethod
     def _build_row_labeled_kymograph(row_kymographs):
@@ -627,8 +648,8 @@ class VisualReviewTool:
         info_top_y = outer_pad + 66
         col_edges = np.linspace(outer_pad, panel_width - outer_pad, 4).astype(np.int32)
         columns = [
-            f"Date: {date_label}",
             f"Capture: {display_capture}",
+            f"Date: {date_label}",
             f"Images: {int(images_used)} | Interval: {display_interval}",
         ]
         for idx, text in enumerate(columns):
@@ -733,11 +754,7 @@ class VisualReviewTool:
 
         parsed_times = []
         for path in image_paths:
-            stem = Path(path).stem
-            try:
-                parsed_times.append(datetime.strptime(stem, "%Y-%m-%d_%H-%M-%S"))
-            except ValueError:
-                parsed_times.append(None)
+            parsed_times.append(VisualReviewTool._parse_capture_datetime(path))
 
         valid_count = len([ts for ts in parsed_times if ts is not None])
         if valid_count < 2:
@@ -772,7 +789,7 @@ class VisualReviewTool:
         for slot_w in slot_widths[:-1]:
             left_edges.append(left_edges[-1] + slot_w)
 
-        previous_labeled_hour = None
+        previous_labeled_hour_key = None
         for idx in range(len(image_paths)):
             x0 = left_edges[idx]
             w = slot_widths[idx]
@@ -782,8 +799,8 @@ class VisualReviewTool:
             ts = parsed_times[idx]
             if ts is None:
                 continue
-            current_hour = ts.hour
-            if previous_labeled_hour is not None and current_hour == previous_labeled_hour:
+            current_hour_key = (ts.date(), ts.hour)
+            if previous_labeled_hour_key is not None and current_hour_key == previous_labeled_hour_key:
                 continue
 
             label = ts.strftime("%H")
@@ -801,9 +818,9 @@ class VisualReviewTool:
                 2,
                 supersample=2,
             )
-            previous_labeled_hour = current_hour
+            previous_labeled_hour_key = current_hour_key
 
-        axis_title = "Time PT"
+        axis_title = "Time UTC"
         (title_w, title_h), _ = cv2.getTextSize(axis_title, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 2)
         title_x = max(2, (total_width - title_w) // 2)
         title_y = max(title_h + 2, axis_h - 4)
@@ -1019,8 +1036,6 @@ class VisualReviewTool:
             date_label = self._infer_date_label(images)
             inferred_capture_label = self.capture_window_label if self.capture_window_label else self._infer_capture_label(images)
             interval_label = self.capture_interval_label if self.capture_interval_label else self._infer_interval_label(images)
-            if self.capture_window_label is None:
-                self.capture_window_label = inferred_capture_label
             top_panel = self._build_top_panel(
                 reference_image=reference_image,
                 slice_rows=slice_rows,
