@@ -245,6 +245,19 @@ def download_day_images(client, bucket, prefix, day_key, slices_dir, download_li
     return scanned, downloaded, skipped_existing
 
 
+def cleanup_day_slices(slices_dir, day_key):
+    image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+    deleted = 0
+
+    for path in slices_dir.glob(f"{day_key}_*"):
+        if not path.is_file() or path.suffix.lower() not in image_extensions:
+            continue
+        path.unlink()
+        deleted += 1
+
+    return deleted
+
+
 def main():
     args = parse_args()
 
@@ -297,6 +310,7 @@ def main():
     total_downloaded = 0
     total_skipped_existing = 0
     built_count = 0
+    total_deleted = 0
 
     for day_key in day_keys:
         prefix = r2_prefix(args.prefix_root, day_key)
@@ -336,6 +350,9 @@ def main():
         )
         if output is not None:
             built_count += 1
+            deleted = cleanup_day_slices(slices_dir=slices_dir, day_key=day_key)
+            total_deleted += deleted
+            print(f"Cleaned {deleted} slice image(s) for {day_key} from {slices_dir}")
 
     print(
         "\nOverall sync summary: "
@@ -345,6 +362,7 @@ def main():
         print("Build skipped for all days (--skip-build).")
     else:
         print(f"Kymographs built: {built_count}/{len(day_keys)}")
+        print(f"Slice images removed: {total_deleted}")
     raise SystemExit(0)
 
 
