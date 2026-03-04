@@ -6,4 +6,5 @@ __pycache__/
 KymoSlices/*
 !KymoSlices/.gitkeep
 image_*.jpg
+!KymoDay/**
 .env
