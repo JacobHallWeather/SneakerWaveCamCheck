@@ -4,8 +4,6 @@ legacy_wave_pipeline/test_images/outputs/
 __pycache__/
 *.pyc
 KymoSlices/*
-KymoDay/*
 !KymoSlices/.gitkeep
-!KymoDay/.gitkeep
 image_*.jpg
 .env
