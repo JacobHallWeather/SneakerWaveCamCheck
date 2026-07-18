@@ -25,23 +25,25 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Skip when R2 credentials are unavailable
-        if: ${{ secrets.R2_ACCOUNT_ID == null || secrets.R2_ACCESS_KEY_ID == null || secrets.R2_SECRET_ACCESS_KEY == null }}
+        if: ${{ secrets.R2_ACCOUNT_ID == '' || secrets.R2_ACCESS_KEY_ID == '' || secrets.R2_SECRET_ACCESS_KEY == '' }}
         run: echo "Skipping daily kymograph run because required R2 credentials are not configured."
 
       - name: Run kymograph for yesterday
-        if: ${{ secrets.R2_ACCOUNT_ID != null && secrets.R2_ACCESS_KEY_ID != null && secrets.R2_SECRET_ACCESS_KEY != null }}
+        if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_OVERRIDE: ${{ secrets.R2_BUCKET }}
+          R2_PATH_PREFIX_OVERRIDE: ${{ secrets.R2_PATH_PREFIX }}
         run: |
           YESTERDAY=$(date -u -d 'yesterday' +%m-%d-%Y)
           ARGS=()
-          if [ -n "${{ secrets.R2_BUCKET }}" ]; then
-            ARGS+=(--bucket "${{ secrets.R2_BUCKET }}")
+          if [ -n "$R2_BUCKET_OVERRIDE" ]; then
+            ARGS+=(--bucket "$R2_BUCKET_OVERRIDE")
           fi
-          if [ -n "${{ secrets.R2_PATH_PREFIX }}" ]; then
-            ARGS+=(--prefix-root "${{ secrets.R2_PATH_PREFIX }}")
+          if [ -n "$R2_PATH_PREFIX_OVERRIDE" ]; then
+            ARGS+=(--prefix-root "$R2_PATH_PREFIX_OVERRIDE")
           fi
           if [ ${#ARGS[@]} -gt 0 ]; then
             python run_kymograph.py "$YESTERDAY" "${ARGS[@]}"
@@ -50,7 +52,7 @@ jobs:
           fi
 
       - name: Commit updated kymographs
-        if: ${{ secrets.R2_ACCOUNT_ID != null && secrets.R2_ACCESS_KEY_ID != null && secrets.R2_SECRET_ACCESS_KEY != null }}
+        if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
         run: |
           if git status --short -- KymoDay | grep -q .; then
             git config user.name "github-actions[bot]"
