@@ -11,6 +11,8 @@ permissions:
 jobs:
   run-kymograph:
     runs-on: ubuntu-latest
+    env:
+      HAS_R2_CREDENTIALS: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
 
     steps:
       - name: Check out repository
@@ -25,11 +27,11 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Skip when R2 credentials are unavailable
-        if: ${{ secrets.R2_ACCOUNT_ID == '' || secrets.R2_ACCESS_KEY_ID == '' || secrets.R2_SECRET_ACCESS_KEY == '' }}
+        if: env.HAS_R2_CREDENTIALS != 'true'
         run: echo "Skipping daily kymograph run because required R2 credentials are not configured."
 
       - name: Run kymograph for yesterday
-        if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
+        if: env.HAS_R2_CREDENTIALS == 'true'
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -48,7 +50,7 @@ jobs:
           python run_kymograph.py "${ARGS[@]}"
 
       - name: Commit updated kymographs
-        if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
+        if: env.HAS_R2_CREDENTIALS == 'true'
         run: |
           if git status --short -- KymoDay | grep -q .; then
             git config user.name "github-actions[bot]"
