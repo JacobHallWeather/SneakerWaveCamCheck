@@ -25,11 +25,11 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Skip when R2 credentials are unavailable
-        if: ${{ secrets.R2_ACCOUNT_ID == '' || secrets.R2_ACCESS_KEY_ID == '' || secrets.R2_SECRET_ACCESS_KEY == '' }}
+        if: secrets.R2_ACCOUNT_ID == '' || secrets.R2_ACCESS_KEY_ID == '' || secrets.R2_SECRET_ACCESS_KEY == ''
         run: echo "Skipping daily kymograph run because required R2 credentials are not configured."
 
       - name: Run kymograph for yesterday
-        if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
+        if: secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != ''
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -38,17 +38,17 @@ jobs:
           R2_PATH_PREFIX_OVERRIDE: ${{ secrets.R2_PATH_PREFIX }}
         run: |
           YESTERDAY=$(date -u -d 'yesterday' +%m-%d-%Y)
-          set -- "$YESTERDAY"
+          ARGS=("$YESTERDAY")
           if [ -n "$R2_BUCKET_OVERRIDE" ]; then
-            set -- "$@" --bucket "$R2_BUCKET_OVERRIDE"
+            ARGS+=(--bucket "$R2_BUCKET_OVERRIDE")
           fi
           if [ -n "$R2_PATH_PREFIX_OVERRIDE" ]; then
-            set -- "$@" --prefix-root "$R2_PATH_PREFIX_OVERRIDE"
+            ARGS+=(--prefix-root "$R2_PATH_PREFIX_OVERRIDE")
           fi
-          python run_kymograph.py "$@"
+          python run_kymograph.py "${ARGS[@]}"
 
       - name: Commit updated kymographs
-        if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
+        if: secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != ''
         run: |
           if git status --short -- KymoDay | grep -q .; then
             git config user.name "github-actions[bot]"
