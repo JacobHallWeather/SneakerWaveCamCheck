@@ -38,14 +38,14 @@ jobs:
           R2_PATH_PREFIX_OVERRIDE: ${{ secrets.R2_PATH_PREFIX }}
         run: |
           YESTERDAY=$(date -u -d 'yesterday' +%m-%d-%Y)
-          ARGS=()
+          set -- "$YESTERDAY"
           if [ -n "$R2_BUCKET_OVERRIDE" ]; then
-            ARGS+=(--bucket "$R2_BUCKET_OVERRIDE")
+            set -- "$@" --bucket "$R2_BUCKET_OVERRIDE"
           fi
           if [ -n "$R2_PATH_PREFIX_OVERRIDE" ]; then
-            ARGS+=(--prefix-root "$R2_PATH_PREFIX_OVERRIDE")
+            set -- "$@" --prefix-root "$R2_PATH_PREFIX_OVERRIDE"
           fi
-          python run_kymograph.py "$YESTERDAY" "${ARGS[@]}"
+          python run_kymograph.py "$@"
 
       - name: Commit updated kymographs
         if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
