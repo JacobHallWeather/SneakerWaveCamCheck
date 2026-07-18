@@ -24,18 +24,29 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Skip when R2 credentials are unavailable
+        if: ${{ secrets.R2_ACCOUNT_ID == '' || secrets.R2_ACCESS_KEY_ID == '' || secrets.R2_SECRET_ACCESS_KEY == '' }}
+        run: echo "Skipping daily kymograph run because required R2 credentials are not configured."
+
       - name: Run kymograph for yesterday
+        if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          R2_PATH_PREFIX: ${{ secrets.R2_PATH_PREFIX }}
         run: |
           YESTERDAY=$(date -u -d 'yesterday' +%m-%d-%Y)
-          python run_kymograph.py "$YESTERDAY"
+          ARGS=()
+          if [ -n "${{ secrets.R2_BUCKET }}" ]; then
+            ARGS+=(--bucket "${{ secrets.R2_BUCKET }}")
+          fi
+          if [ -n "${{ secrets.R2_PATH_PREFIX }}" ]; then
+            ARGS+=(--prefix-root "${{ secrets.R2_PATH_PREFIX }}")
+          fi
+          python run_kymograph.py "$YESTERDAY" "${ARGS[@]}"
 
       - name: Commit updated kymographs
+        if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
         run: |
           if git status --short -- KymoDay | grep -q .; then
             git config user.name "github-actions[bot]"
