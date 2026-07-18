@@ -26,10 +26,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Skip when R2 credentials are unavailable
-        if: env.HAS_R2_CREDENTIALS != 'true'
-        run: echo "Skipping daily kymograph run because required R2 credentials are not configured."
-
       - name: Run kymograph for yesterday
         if: env.HAS_R2_CREDENTIALS == 'true'
         env:
