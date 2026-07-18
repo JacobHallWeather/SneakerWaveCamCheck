@@ -45,11 +45,7 @@ jobs:
           if [ -n "$R2_PATH_PREFIX_OVERRIDE" ]; then
             ARGS+=(--prefix-root "$R2_PATH_PREFIX_OVERRIDE")
           fi
-          if [ ${#ARGS[@]} -gt 0 ]; then
-            python run_kymograph.py "$YESTERDAY" "${ARGS[@]}"
-          else
-            python run_kymograph.py "$YESTERDAY"
-          fi
+          python run_kymograph.py "$YESTERDAY" "${ARGS[@]}"
 
       - name: Commit updated kymographs
         if: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
